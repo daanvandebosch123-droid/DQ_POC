@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dqtool"
+version = "0.1.0"
+description = "Data quality tool for Oracle and CSV sources with a NiceGUI web UI."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "nicegui>=2.0.0",
+  "duckdb>=1.0.0",
+  "oracledb>=2.2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.6",
+]
+sqlserver = [
+  "pyodbc>=5.0",
+]
+db2 = [
+  "pyodbc>=5.0",
+]
+
+[project.scripts]
+dqtool = "dqtool.app:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dqtool = ["assets/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]

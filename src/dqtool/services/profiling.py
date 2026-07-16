@@ -186,7 +186,7 @@ class ProfilingService:
         return ", ".join(values) if values else "(none)"
 
     def _profile_oracle(self, source_config: dict[str, Any], connection: Connection) -> dict[str, Any]:
-        sql = self.connector_service.oracle_rule_source_sql(source_config)
+        sql = self.connector_service.rule_source_sql(source_config)
         dialect = self.connector_service.database_dialect(connection)
         db_conn = self.connector_service.connect_database(connection)
         numeric_markers = ("NUMBER", "FLOAT", "DECIMAL", "NUMERIC", "INT", "DOUBLE", "REAL")

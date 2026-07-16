@@ -33,7 +33,7 @@ from dqtool.models.entities import (
     utc_now,
 )
 from dqtool.services.ai import OllamaService
-from dqtool.services.connectors import ConnectorService
+from dqtool.services.connectors import ODBC_SETTINGS, ConnectorService
 from dqtool.services.execution import ExecutionService
 from dqtool.services.profiling import ProfilingService, detect_anomalies, source_profile_key
 from dqtool.services.project import (
@@ -74,6 +74,62 @@ CHART_INK = "#37332e"
 CHART_MUTED = "#837d74"
 CHART_GRID = "#e2ded7"
 CHART_SERIES = "#6f6960"
+
+# Shared Quasar cell templates -------------------------------------------------
+
+# Tree Name cell used by the Rules and Results overview tables: CSS indentation by depth,
+# per-kind icon, and (for groups with children) a chevron that emits `toggle_group`
+# to collapse/expand the subtree without selecting the row.
+TREE_NAME_CELL_TEMPLATE = r"""
+    <q-td key="name" :props="props">
+        <div class="row items-center no-wrap" :style="{ paddingLeft: (props.row.depth * 22) + 'px' }">
+            <q-icon
+                v-if="props.row.kind === 'group' && props.row.has_children"
+                :name="props.row.collapsed ? 'chevron_right' : 'expand_more'"
+                size="18px"
+                class="q-mr-xs cursor-pointer"
+                style="color: #6f6960"
+                @click.stop="() => $parent.$emit('toggle_group', props.row)"
+            />
+            <div v-else style="width: 22px; display: inline-block;"></div>
+            <q-icon
+                v-if="props.row.depth > 0"
+                name="subdirectory_arrow_right"
+                size="16px"
+                class="q-mr-xs"
+                style="color: #837d74"
+            />
+            <q-icon
+                v-if="props.row.kind === 'group'"
+                name="folder"
+                size="16px"
+                class="q-mr-xs"
+                style="color: #6f6960"
+            />
+            <q-icon
+                v-else
+                name="checklist"
+                size="16px"
+                class="q-mr-xs"
+                style="color: #8d8579"
+            />
+            <span :style="(props.row.kind === 'group' && props.row.depth === 0) ? 'font-weight:700' : ''">{{ props.row.name }}</span>
+        </div>
+    </q-td>
+"""
+
+# PASSED/FAILED/ERROR badge used by the Results and Schedules tables.
+STATUS_BADGE_CELL_TEMPLATE = r"""
+    <q-td key="last_status" :props="props">
+        <q-badge
+            v-if="props.row.last_status !== '-'"
+            :color="props.row.last_status === 'PASSED' ? 'positive' : (props.row.last_status === 'FAILED' ? 'negative' : 'warning')"
+            text-color="white"
+            :label="props.row.last_status"
+        />
+        <span v-else>-</span>
+    </q-td>
+"""
 
 # Official Colruyt Group mark (cropped from the full logo); SVG below is the fallback.
 LOGO_MARK_PATH = Path(__file__).parent / "assets" / "logo_mark.png"
@@ -676,48 +732,7 @@ class DQToolWebApp:
                 </q-td>
                 """,
             )
-            # Renders the Name cell with real CSS indentation, a per-kind icon, and (for groups
-            # with children) a chevron that collapses/expands the subtree without selecting the row.
-            self.overview_table.add_slot(
-                "body-cell-name",
-                r"""
-                <q-td key="name" :props="props">
-                    <div class="row items-center no-wrap" :style="{ paddingLeft: (props.row.depth * 22) + 'px' }">
-                        <q-icon
-                            v-if="props.row.kind === 'group' && props.row.has_children"
-                            :name="props.row.collapsed ? 'chevron_right' : 'expand_more'"
-                            size="18px"
-                            class="q-mr-xs cursor-pointer"
-                            style="color: #6f6960"
-                            @click.stop="() => $parent.$emit('toggle_group', props.row)"
-                        />
-                        <div v-else style="width: 22px; display: inline-block;"></div>
-                        <q-icon
-                            v-if="props.row.depth > 0"
-                            name="subdirectory_arrow_right"
-                            size="16px"
-                            class="q-mr-xs"
-                            style="color: #837d74"
-                        />
-                        <q-icon
-                            v-if="props.row.kind === 'group'"
-                            name="folder"
-                            size="16px"
-                            class="q-mr-xs"
-                            style="color: #6f6960"
-                        />
-                        <q-icon
-                            v-else
-                            name="checklist"
-                            size="16px"
-                            class="q-mr-xs"
-                            style="color: #8d8579"
-                        />
-                        <span :style="(props.row.kind === 'group' && props.row.depth === 0) ? 'font-weight:700' : ''">{{ props.row.name }}</span>
-                    </div>
-                </q-td>
-                """,
-            )
+            self.overview_table.add_slot("body-cell-name", TREE_NAME_CELL_TEMPLATE)
             # Colors visibility so private/shared/shared_specific reads at a glance instead of as plain text.
             self.overview_table.add_slot(
                 "body-cell-visibility",
@@ -770,20 +785,7 @@ class DQToolWebApp:
             ).props("flat bordered wrap-cells").classes("dq-table-wrap w-full mt-4")
             self.schedules_table.classes(add="dq-selectable-table")
             self.schedules_table.on("rowClick", self._select_schedule_row)
-            self.schedules_table.add_slot(
-                "body-cell-last_status",
-                r"""
-                <q-td key="last_status" :props="props">
-                    <q-badge
-                        v-if="props.row.last_status !== '-'"
-                        :color="props.row.last_status === 'PASSED' ? 'positive' : (props.row.last_status === 'FAILED' ? 'negative' : 'warning')"
-                        text-color="white"
-                        :label="props.row.last_status"
-                    />
-                    <span v-else>-</span>
-                </q-td>
-                """,
-            )
+            self.schedules_table.add_slot("body-cell-last_status", STATUS_BADGE_CELL_TEMPLATE)
             self.schedules_table.add_slot(
                 "body-cell-enabled",
                 r"""
@@ -828,61 +830,9 @@ class DQToolWebApp:
                 self.rule_summary_table.on("rowClick", self._select_result_rule_row)
                 self.rule_summary_table.on("toggle_group", self._on_toggle_results_group)
                 # Same tree treatment as the Rules tab: indentation + per-kind icon + collapse chevron.
-                self.rule_summary_table.add_slot(
-                    "body-cell-name",
-                    r"""
-                    <q-td key="name" :props="props">
-                        <div class="row items-center no-wrap" :style="{ paddingLeft: (props.row.depth * 22) + 'px' }">
-                            <q-icon
-                                v-if="props.row.kind === 'group' && props.row.has_children"
-                                :name="props.row.collapsed ? 'chevron_right' : 'expand_more'"
-                                size="18px"
-                                class="q-mr-xs cursor-pointer"
-                                style="color: #6f6960"
-                                @click.stop="() => $parent.$emit('toggle_group', props.row)"
-                            />
-                            <div v-else style="width: 22px; display: inline-block;"></div>
-                            <q-icon
-                                v-if="props.row.depth > 0"
-                                name="subdirectory_arrow_right"
-                                size="16px"
-                                class="q-mr-xs"
-                                style="color: #837d74"
-                            />
-                            <q-icon
-                                v-if="props.row.kind === 'group'"
-                                name="folder"
-                                size="16px"
-                                class="q-mr-xs"
-                                style="color: #6f6960"
-                            />
-                            <q-icon
-                                v-else
-                                name="checklist"
-                                size="16px"
-                                class="q-mr-xs"
-                                style="color: #8d8579"
-                            />
-                            <span :style="(props.row.kind === 'group' && props.row.depth === 0) ? 'font-weight:700' : ''">{{ props.row.name }}</span>
-                        </div>
-                    </q-td>
-                    """,
-                )
+                self.rule_summary_table.add_slot("body-cell-name", TREE_NAME_CELL_TEMPLATE)
                 # Colors the aggregated/last status so passed/failed/error reads at a glance.
-                self.rule_summary_table.add_slot(
-                    "body-cell-last_status",
-                    r"""
-                    <q-td key="last_status" :props="props">
-                        <q-badge
-                            v-if="props.row.last_status !== '-'"
-                            :color="props.row.last_status === 'PASSED' ? 'positive' : (props.row.last_status === 'FAILED' ? 'negative' : 'warning')"
-                            text-color="white"
-                            :label="props.row.last_status"
-                        />
-                        <span v-else>-</span>
-                    </q-td>
-                    """,
-                )
+                self.rule_summary_table.add_slot("body-cell-last_status", STATUS_BADGE_CELL_TEMPLATE)
             with ui.card().classes("dq-soft-card w-full p-6"):
                 with ui.row().classes("w-full items-start justify-between gap-4 flex-wrap"):
                     with ui.column().classes("gap-1"):
@@ -1468,10 +1418,10 @@ class DQToolWebApp:
             port = ui.number("Port", value=existing_config.get("port", 1521), format="%.0f").classes("w-full")
             service_name = ui.input("Service Name", value=str(existing_config.get("service_name", ""))).classes("w-full")
             database_name = ui.input("Database", value=str(existing_config.get("database", ""))).classes("w-full")
+            # Defaults come from the connector layer so the dialog can never drift from
+            # what connect_database() actually uses.
             default_drivers = {
-                ConnectionType.SQLSERVER.value: "ODBC Driver 17 for SQL Server",
-                ConnectionType.DB2.value: "IBM DB2 ODBC DRIVER",
-                ConnectionType.SYBASE.value: "Adaptive Server Enterprise",
+                odbc_type.value: settings.default_driver for odbc_type, settings in ODBC_SETTINGS.items()
             }
             initial_driver = str(existing_config.get("driver", "")) or default_drivers.get(
                 existing.connection_type.value if existing else "", "ODBC Driver 17 for SQL Server"
@@ -1486,9 +1436,7 @@ class DQToolWebApp:
 
             default_ports = {
                 ConnectionType.ORACLE.value: 1521,
-                ConnectionType.SQLSERVER.value: 1433,
-                ConnectionType.DB2.value: 50000,
-                ConnectionType.SYBASE.value: 5000,
+                **{odbc_type.value: settings.default_port for odbc_type, settings in ODBC_SETTINGS.items()},
             }
 
             def sync_visibility() -> None:
@@ -1502,11 +1450,7 @@ class DQToolWebApp:
                 password.visible = is_database
                 service_name.visible = is_oracle
                 tns_alias.visible = is_oracle
-                database_name.visible = selected in {
-                    ConnectionType.SQLSERVER.value,
-                    ConnectionType.DB2.value,
-                    ConnectionType.SYBASE.value,
-                }
+                database_name.visible = selected in default_drivers
                 odbc_driver.visible = selected in default_drivers
                 if is_database and port.value in (None, *default_ports.values()):
                     port.value = default_ports.get(selected, 1521)
@@ -1539,7 +1483,7 @@ class DQToolWebApp:
                             "username": (username.value or "").strip(),
                             "tns_alias": (tns_alias.value or "").strip(),
                         }
-                    elif selected_type in {ConnectionType.SQLSERVER, ConnectionType.DB2, ConnectionType.SYBASE}:
+                    elif selected_type in ODBC_SETTINGS:
                         config = {
                             "host": (host.value or "").strip(),
                             "port": int(port.value or default_ports[selected_type.value]),
@@ -2637,16 +2581,8 @@ class DQToolWebApp:
         if not rules:
             ui.notify("The scheduled rule or group no longer exists or is not accessible.", type="warning")
             return
-        connections = {item.id: item for item in self._visible_connections() if item.id is not None}
         try:
-            runs = await nicegui_run.io_bound(
-                self.execution_service.run_rules, rules, {}, connections, self.project.results_dir, self.current_user
-            )
-            for run in runs:
-                self.project.storage.save_rule_run(run)
-            passed = sum(1 for run in runs if run.status == "passed")
-            failed = sum(1 for run in runs if run.status == "failed")
-            errored = sum(1 for run in runs if run.status == "error")
+            runs, passed, failed, errored = await self._run_rules_batch(rules)
             self.refresh_all()
             self._set_last_action(f"Ran schedule {schedule.name} on demand")
             ui.notify(
@@ -2784,6 +2720,28 @@ class DQToolWebApp:
                 ui.button("Run", icon="playlist_play", on_click=confirm).props("color=secondary unelevated")
         dialog.open()
 
+    async def _run_rules_batch(self, rules: list[Rule]) -> tuple[list[RuleRun], int, int, int]:
+        """Run rules against the open project, persist the runs, and count the outcomes.
+
+        Shared by the single-rule Run button, group runs, checked-rule batches, and the
+        schedule "Run now" button. Returns (runs, passed, failed, errored).
+        """
+        connections = {connection.id: connection for connection in self._visible_connections() if connection.id is not None}
+        runs = await nicegui_run.io_bound(
+            self.execution_service.run_rules,
+            rules,
+            {},
+            connections,
+            self.project.results_dir,
+            self.current_user,
+        )
+        for run in runs:
+            self.project.storage.save_rule_run(run)
+        passed = sum(1 for run in runs if run.status == "passed")
+        failed = sum(1 for run in runs if run.status == "failed")
+        errored = sum(1 for run in runs if run.status == "error")
+        return runs, passed, failed, errored
+
     async def _execute_group_rules(
         self,
         group: RuleGroup,
@@ -2791,23 +2749,10 @@ class DQToolWebApp:
         missing_rules: int,
         missing_groups: int,
     ) -> None:
-        connections = {connection.id: connection for connection in self._visible_connections() if connection.id is not None}
         try:
-            runs = await nicegui_run.io_bound(
-                self.execution_service.run_rules,
-                rules,
-                {},
-                connections,
-                self.project.results_dir,
-                self.current_user,
-            )
-            for run in runs:
-                self.project.storage.save_rule_run(run)
+            runs, passed, failed, errored = await self._run_rules_batch(rules)
             self.refresh_all()
             self._set_last_action(f"Ran rule group {group.name}")
-            passed = sum(1 for run in runs if run.status == "passed")
-            failed = sum(1 for run in runs if run.status == "failed")
-            errored = sum(1 for run in runs if run.status == "error")
             message = f"Group '{group.name}': {passed} passed, {failed} failed, {errored} errored ({len(runs)} rules, incl. subgroups)."
             skipped_bits = []
             if missing_rules:
@@ -2893,18 +2838,8 @@ class DQToolWebApp:
         if rule is None:
             ui.notify("Select a rule first.", type="warning")
             return
-        connections = {connection.id: connection for connection in self._visible_connections() if connection.id is not None}
         try:
-            runs = await nicegui_run.io_bound(
-                self.execution_service.run_rules,
-                [rule],
-                {},
-                connections,
-                self.project.results_dir,
-                self.current_user,
-            )
-            for run in runs:
-                self.project.storage.save_rule_run(run)
+            runs, _passed, _failed, _errored = await self._run_rules_batch([rule])
             self.refresh_all()
             self._set_last_action(f"Ran rule {rule.name}")
             self._notify_run_outcome(rule, runs[0])
@@ -2950,24 +2885,11 @@ class DQToolWebApp:
         dialog.open()
 
     async def _execute_checked_rules(self, rules: list[Rule], missing: int) -> None:
-        connections = {connection.id: connection for connection in self._visible_connections() if connection.id is not None}
         try:
-            runs = await nicegui_run.io_bound(
-                self.execution_service.run_rules,
-                rules,
-                {},
-                connections,
-                self.project.results_dir,
-                self.current_user,
-            )
-            for run in runs:
-                self.project.storage.save_rule_run(run)
+            runs, passed, failed, errored = await self._run_rules_batch(rules)
             self._checked_rule_keys.clear()
             self.refresh_all()
             self._set_last_action(f"Ran {len(runs)} selected rule(s)")
-            passed = sum(1 for run in runs if run.status == "passed")
-            failed = sum(1 for run in runs if run.status == "failed")
-            errored = sum(1 for run in runs if run.status == "error")
             message = f"Selected rules: {passed} passed, {failed} failed, {errored} errored ({len(runs)} rule(s))."
             if missing:
                 message += f" Skipped {missing} deleted or inaccessible rule(s)."
@@ -3538,81 +3460,6 @@ class DQToolWebApp:
         self._overview_all_rows = rows
         self._set_item_select_options(options)
         self._refresh_overview_view()
-
-    def _OLD_populate_groups_removed(self) -> None:
-        return None
-        rules = self._visible_rules()
-        rules_by_id = {rule.id: rule for rule in rules if rule.id is not None}
-        rule_names_by_id = {rule_id: rule.name for rule_id, rule in rules_by_id.items()}
-        groups = self._visible_groups()
-        groups_by_id = {item.id: item for item in groups if item.id is not None}
-        parent_names_by_child_id = self._group_parent_names(groups)
-        ordered, _root_ids = self._hierarchical_group_order(groups, groups_by_id, parent_names_by_child_id)
-
-        rows = []
-        options: dict[str, str] = {}
-        for item, depth in ordered:
-            member_names = [rule_names_by_id[rule_id] for rule_id in item.rule_ids if rule_id in rule_names_by_id]
-            total_rules, _missing_rules, _missing_groups = resolve_group_rules(item, groups_by_id, rules_by_id)
-            direct_count = len(item.rule_ids)
-            total_count = len(total_rules)
-            rules_summary = f"{total_count} total" if total_count == direct_count else f"{direct_count} direct / {total_count} total"
-            used_in = parent_names_by_child_id.get(item.id, [])
-            # _unused_indent = "    " * depth
-            rows.append(
-                {
-                    "id": item.id,
-                    "name": item.name,
-                    "depth": depth,
-                    "owner": item.owner_username,
-                    "visibility": item.visibility,
-                    "rules": ", ".join(member_names) or "-",
-                    "rule_count": rules_summary,
-                    "subgroups": str(len(item.child_group_ids)) if item.child_group_ids else "-",
-                    "used_in": ", ".join(used_in) if used_in else "-",
-                }
-            )
-            options[str(item.id)] = f"{item.name} ({rules_summary})"
-        self.groups_table.rows = rows
-        self.groups_table.update()
-        self._set_select_options(self.group_select, options, self.selected_group_id)
-        self._highlight_table_row(self.groups_table, self.group_select.value)
-
-    def _hierarchical_group_order(
-        self,
-        groups: list[RuleGroup],
-        groups_by_id: dict[int, RuleGroup],
-        parent_names_by_child_id: dict[int, list[str]],
-    ) -> tuple[list[tuple[RuleGroup, int]], list[int]]:
-        """Depth-first ordering of groups for the flat table: each root, then its subgroups indented below it.
-
-        Root groups are the ones nobody nests as a subgroup. A group reachable from more than one
-        parent is placed once, under whichever root reaches it first; the "Used In" column still lists
-        every parent.
-        """
-        root_ids = [item.id for item in groups if item.id is not None and item.id not in parent_names_by_child_id]
-        ordered: list[tuple[RuleGroup, int]] = []
-        visited: set[int] = set()
-
-        def visit(group_id: int, depth: int) -> None:
-            if group_id in visited or group_id not in groups_by_id:
-                return
-            visited.add(group_id)
-            group = groups_by_id[group_id]
-            ordered.append((group, depth))
-            for child_id in group.child_group_ids:
-                visit(child_id, depth + 1)
-
-        for root_id in root_ids:
-            visit(root_id, 0)
-        # Defensive fallback: a group that is somehow unreachable from any root (should not
-        # happen once every group has been through save-time cycle validation) still needs a row.
-        leftover_root_ids = []
-        for item in groups:
-            if item.id is not None and item.id not in visited:
-                visit(item.id, 0)
-                leftover_root_ids.append(item.id)
-        return ordered, [*root_ids, *leftover_root_ids]
 
     def _group_parent_names(self, groups: list[RuleGroup]) -> dict[int, list[str]]:
         """Reverse lookup: for each group id, which other visible groups nest it as a subgroup."""

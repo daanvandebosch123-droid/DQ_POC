@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,40 @@ except Exception:  # pragma: no cover - allows UI boot without ODBC libs
     pyodbc = None
 
 
+@dataclass(frozen=True, slots=True)
+class OdbcSettings:
+    """Everything that differs between the ODBC-based database types."""
+
+    default_driver: str
+    default_port: int
+    template: str  # connection-string template; placeholders: driver, host, port, database, username, password
+
+
+ODBC_SETTINGS: dict[ConnectionType, OdbcSettings] = {
+    ConnectionType.SQLSERVER: OdbcSettings(
+        default_driver="ODBC Driver 17 for SQL Server",
+        default_port=1433,
+        template=(
+            "DRIVER={{{driver}}};SERVER={host},{port};DATABASE={database};"
+            "UID={username};PWD={password};TrustServerCertificate=yes;"
+        ),
+    ),
+    ConnectionType.DB2: OdbcSettings(
+        default_driver="IBM DB2 ODBC DRIVER",
+        default_port=50000,
+        template=(
+            "DRIVER={{{driver}}};DATABASE={database};HOSTNAME={host};PORT={port};"
+            "PROTOCOL=TCPIP;UID={username};PWD={password};"
+        ),
+    ),
+    ConnectionType.SYBASE: OdbcSettings(
+        default_driver="Adaptive Server Enterprise",
+        default_port=5000,
+        template="DRIVER={{{driver}}};NA={host},{port};UID={username};PWD={password};DB={database};",
+    ),
+}
+
+
 class ConnectorService:
     def __init__(self) -> None:
         self._encoding_cache: dict[tuple[str, int, int], str] = {}
@@ -27,13 +62,13 @@ class ConnectorService:
     def preview_dataset(self, dataset: Dataset, connection_lookup: dict[int, Connection]) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
         if dataset.dataset_type in {DatasetType.CSV_FILE, DatasetType.CSV_FOLDER_FILE, DatasetType.APP_JOIN}:
             return self._preview_local(dataset, connection_lookup)
-        return self._preview_oracle(dataset, connection_lookup)
+        return self._preview_database(dataset, connection_lookup)
 
     def preview_rule_source(self, source_config: dict[str, Any], connection_lookup: dict[int, Connection]) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
         connection = self._rule_connection(source_config, connection_lookup)
         if connection.connection_type == ConnectionType.CSV:
             return self._preview_csv_source(source_config, connection)
-        return self._preview_oracle_source(source_config, connection)
+        return self._preview_database_source(source_config, connection)
 
     def list_dataset_columns(self, dataset: Dataset, connection_lookup: dict[int, Connection]) -> list[str]:
         if dataset.dataset_type in {DatasetType.CSV_FILE, DatasetType.CSV_FOLDER_FILE, DatasetType.APP_JOIN}:
@@ -119,7 +154,7 @@ class ConnectorService:
         connection = self._rule_connection(source_config, connection_lookup)
         if connection.connection_type == ConnectionType.CSV:
             return self._csv_source_columns(source_config, connection)
-        return self._oracle_source_columns(source_config, connection)
+        return self._database_source_columns(source_config, connection)
 
     def _preview_local(self, dataset: Dataset, connection_lookup: dict[int, Connection]) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
         con = duckdb.connect()
@@ -132,7 +167,7 @@ class ConnectorService:
         finally:
             con.close()
 
-    def _preview_oracle(self, dataset: Dataset, connection_lookup: dict[int, Connection]) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
+    def _preview_database(self, dataset: Dataset, connection_lookup: dict[int, Connection]) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
         connection = connection_lookup[dataset.connection_id or 0]
         db_conn = self.connect_database(connection)
         sql = dataset.config["sql"] if dataset.dataset_type == DatasetType.ORACLE_SQL else f"SELECT * FROM {dataset.config['table_name']}"
@@ -160,9 +195,9 @@ class ConnectorService:
         finally:
             con.close()
 
-    def _preview_oracle_source(self, source_config: dict[str, Any], connection: Connection) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
+    def _preview_database_source(self, source_config: dict[str, Any], connection: Connection) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
         db_conn = self.connect_database(connection)
-        sql = self.oracle_rule_source_sql(source_config)
+        sql = self.rule_source_sql(source_config)
         preview_sql = self.limited_sql(sql, 100, self.database_dialect(connection))
         try:
             with db_conn.cursor() as cursor:
@@ -195,12 +230,8 @@ class ConnectorService:
     def connect_database(self, connection: Connection):
         if connection.connection_type == ConnectionType.ORACLE:
             return self._connect_oracle(connection)
-        if connection.connection_type == ConnectionType.SQLSERVER:
-            return self._connect_sqlserver(connection)
-        if connection.connection_type == ConnectionType.DB2:
-            return self._connect_db2(connection)
-        if connection.connection_type == ConnectionType.SYBASE:
-            return self._connect_sybase(connection)
+        if connection.connection_type in ODBC_SETTINGS:
+            return self._connect_odbc(connection)
         raise RuntimeError(f"Unsupported database connection type: {connection.connection_type.value}")
 
     def limited_sql(self, sql: str, limit: int, dialect: str) -> str:
@@ -215,47 +246,19 @@ class ConnectorService:
             raise RuntimeError("No saved local password found for this connection.")
         return password
 
-    def _connect_sqlserver(self, connection: Connection):
+    def _connect_odbc(self, connection: Connection):
+        """Shared pyodbc connect for every ODBC-based type; per-type details live in ODBC_SETTINGS."""
         if pyodbc is None:
             raise RuntimeError("The pyodbc package is not installed. Install it with: pip install pyodbc")
+        settings = ODBC_SETTINGS[connection.connection_type]
         username = connection.config.get("username")
-        password = self._database_password(connection, username)
-        driver = connection.config.get("driver") or "ODBC Driver 17 for SQL Server"
-        host = connection.config.get("host")
-        port = connection.config.get("port") or 1433
-        database = connection.config.get("database") or ""
-        connection_string = (
-            f"DRIVER={{{driver}}};SERVER={host},{port};DATABASE={database};"
-            f"UID={username};PWD={password};TrustServerCertificate=yes;"
-        )
-        return pyodbc.connect(connection_string, timeout=10)
-
-    def _connect_db2(self, connection: Connection):
-        if pyodbc is None:
-            raise RuntimeError("The pyodbc package is not installed. Install it with: pip install pyodbc")
-        username = connection.config.get("username")
-        password = self._database_password(connection, username)
-        driver = connection.config.get("driver") or "IBM DB2 ODBC DRIVER"
-        host = connection.config.get("host")
-        port = connection.config.get("port") or 50000
-        database = connection.config.get("database") or ""
-        connection_string = (
-            f"DRIVER={{{driver}}};DATABASE={database};HOSTNAME={host};PORT={port};"
-            f"PROTOCOL=TCPIP;UID={username};PWD={password};"
-        )
-        return pyodbc.connect(connection_string, timeout=10)
-
-    def _connect_sybase(self, connection: Connection):
-        if pyodbc is None:
-            raise RuntimeError("The pyodbc package is not installed. Install it with: pip install pyodbc")
-        username = connection.config.get("username")
-        password = self._database_password(connection, username)
-        driver = connection.config.get("driver") or "Adaptive Server Enterprise"
-        host = connection.config.get("host")
-        port = connection.config.get("port") or 5000
-        database = connection.config.get("database") or ""
-        connection_string = (
-            f"DRIVER={{{driver}}};NA={host},{port};UID={username};PWD={password};DB={database};"
+        connection_string = settings.template.format(
+            driver=connection.config.get("driver") or settings.default_driver,
+            host=connection.config.get("host"),
+            port=connection.config.get("port") or settings.default_port,
+            database=connection.config.get("database") or "",
+            username=username,
+            password=self._database_password(connection, username),
         )
         return pyodbc.connect(connection_string, timeout=10)
 
@@ -338,7 +341,7 @@ class ConnectorService:
             index += 1
         return candidate
 
-    def oracle_rule_source_sql(self, source_config: dict[str, Any]) -> str:
+    def rule_source_sql(self, source_config: dict[str, Any]) -> str:
         if source_config.get("source_kind") == "oracle_sql":
             return source_config["source_sql"]
         return f"SELECT * FROM {source_config['source_name']}"
@@ -386,9 +389,9 @@ class ConnectorService:
             return selected_file
         return Path(connection.config["base_path"]) / str(source_config.get("source_name") or "")
 
-    def _oracle_source_columns(self, source_config: dict[str, Any], connection: Connection) -> list[str]:
+    def _database_source_columns(self, source_config: dict[str, Any], connection: Connection) -> list[str]:
         db_conn = self.connect_database(connection)
-        sql = self.oracle_rule_source_sql(source_config)
+        sql = self.rule_source_sql(source_config)
         try:
             with db_conn.cursor() as cursor:
                 cursor.execute(self.limited_sql(sql, 0, self.database_dialect(connection)))

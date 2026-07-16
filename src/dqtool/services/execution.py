@@ -4,6 +4,7 @@ import csv
 import math
 import re
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,67 @@ LOCAL_DATASET_TYPES = {DatasetType.CSV_FILE, DatasetType.CSV_FOLDER_FILE, Datase
 FAILED_ROW_LIMIT = 500
 FETCH_BATCH_SIZE = 5000
 KEY_FETCH_BATCH_SIZE = 10000
+
+
+@dataclass(frozen=True, slots=True)
+class DialectSupport:
+    """SQL details that differ per database dialect.
+
+    Templates use str.format placeholders. A `None` regex/date predicate means that rule
+    type is not supported on the dialect and rule building raises a ValueError instead.
+    Adding a database = adding one entry to DIALECTS (plus ODBC_SETTINGS in connectors.py).
+    """
+
+    label: str
+    text_expr: str  # {column}
+    length_function: str  # wraps an already-cast text expression
+    summary_from_clause: str
+    regex_fail_predicate: str | None  # {text_column}, {pattern}
+    date_fail_predicate: str | None  # {column}, {text_column}
+
+
+DIALECTS: dict[str, DialectSupport] = {
+    "duckdb": DialectSupport(
+        label="DuckDB",
+        text_expr="CAST({column} AS VARCHAR)",
+        length_function="length",
+        summary_from_clause="",
+        regex_fail_predicate="NOT regexp_matches({text_column}, {pattern})",
+        date_fail_predicate="try_cast({column} AS DATE) IS NULL",
+    ),
+    "oracle": DialectSupport(
+        label="Oracle",
+        text_expr="TO_CHAR({column})",
+        length_function="length",
+        summary_from_clause=" FROM dual",
+        regex_fail_predicate="NOT REGEXP_LIKE({text_column}, {pattern})",
+        date_fail_predicate="VALIDATE_CONVERSION({column} AS DATE) = 0",
+    ),
+    "sqlserver": DialectSupport(
+        label="SQL Server",
+        text_expr="CAST({column} AS NVARCHAR(4000))",
+        length_function="LEN",
+        summary_from_clause="",
+        regex_fail_predicate=None,
+        date_fail_predicate="TRY_CONVERT(date, {text_column}) IS NULL",
+    ),
+    "db2": DialectSupport(
+        label="DB2",
+        text_expr="CAST({column} AS VARCHAR(4000))",
+        length_function="length",
+        summary_from_clause=" FROM SYSIBM.SYSDUMMY1",
+        regex_fail_predicate="NOT REGEXP_LIKE({text_column}, {pattern})",
+        date_fail_predicate=None,
+    ),
+    "sybase": DialectSupport(
+        label="Sybase",
+        text_expr="CAST({column} AS VARCHAR(4000))",
+        length_function="LEN",
+        summary_from_clause="",
+        regex_fail_predicate=None,
+        date_fail_predicate=None,
+    ),
+}
 
 # Maps accepted operator spellings to SQL that is valid in both DuckDB and Oracle.
 _COMPARISON_OPERATORS = {
@@ -123,7 +185,7 @@ class ExecutionService:
             return self._execute_referential_integrity(rule, dataset, target_dataset, connections)
         if dataset.dataset_type in LOCAL_DATASET_TYPES:
             return self._run_duckdb_rule(rule, self._dataset_relation_builder(dataset, connections))
-        return self._run_oracle_rule(rule, connections[dataset.connection_id or 0], self._oracle_dataset_sql(dataset))
+        return self._run_database_rule(rule, connections[dataset.connection_id or 0], self._dataset_sql(dataset))
 
     def _execute_rule_source(
         self,
@@ -136,7 +198,7 @@ class ExecutionService:
             return self._run_connection_sql_rule(rule, connection)
         if connection.connection_type.value == "csv":
             return self._run_duckdb_rule(rule, self._rule_source_relation_builder(source_config, connections))
-        return self._run_oracle_rule(rule, connection, self.connector_service.oracle_rule_source_sql(source_config))
+        return self._run_database_rule(rule, connection, self.connector_service.rule_source_sql(source_config))
 
     def _run_connection_sql_rule(self, rule: Rule, connection: Connection) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Run rule SQL against the whole connection instead of one selected table.
@@ -199,7 +261,7 @@ class ExecutionService:
         finally:
             con.close()
 
-    def _run_oracle_rule(self, rule: Rule, connection: Connection, source_sql: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    def _run_database_rule(self, rule: Rule, connection: Connection, source_sql: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         dialect = self.connector_service.database_dialect(connection)
         failed_sql, summary_sql = self._build_rule_sql(rule, f"({source_sql})", dialect=dialect)
         db_conn = self.connector_service.connect_database(connection)
@@ -304,13 +366,13 @@ class ExecutionService:
     def _iter_dataset_rows(self, dataset: Dataset, connections: dict[int, Connection]) -> RowBatches:
         if dataset.dataset_type in LOCAL_DATASET_TYPES:
             return self._iter_duckdb_rows(self._dataset_relation_builder(dataset, connections))
-        return self._iter_oracle_rows(connections[dataset.connection_id or 0], self._oracle_dataset_sql(dataset))
+        return self._iter_database_rows(connections[dataset.connection_id or 0], self._dataset_sql(dataset))
 
     def _iter_rule_source_rows(self, source_config: dict[str, Any], connections: dict[int, Connection]) -> RowBatches:
         connection = connections[int(source_config["source_connection_id"])]
         if connection.connection_type.value == "csv":
             return self._iter_duckdb_rows(self._rule_source_relation_builder(source_config, connections))
-        return self._iter_oracle_rows(connection, self.connector_service.oracle_rule_source_sql(source_config))
+        return self._iter_database_rows(connection, self.connector_service.rule_source_sql(source_config))
 
     def _iter_duckdb_rows(self, build_relation: RelationBuilder) -> RowBatches:
         con = duckdb.connect()
@@ -323,7 +385,7 @@ class ExecutionService:
         finally:
             con.close()
 
-    def _iter_oracle_rows(self, connection: Connection, source_sql: str) -> RowBatches:
+    def _iter_database_rows(self, connection: Connection, source_sql: str) -> RowBatches:
         db_conn = self.connector_service.connect_database(connection)
         try:
             with db_conn.cursor() as cursor:
@@ -339,13 +401,13 @@ class ExecutionService:
     def _collect_dataset_keys(self, dataset: Dataset, key_column: str, connections: dict[int, Connection]) -> set[str]:
         if dataset.dataset_type in LOCAL_DATASET_TYPES:
             return self._collect_keys_duckdb(self._dataset_relation_builder(dataset, connections), key_column)
-        return self._collect_keys_oracle(connections[dataset.connection_id or 0], self._oracle_dataset_sql(dataset), key_column)
+        return self._collect_keys_database(connections[dataset.connection_id or 0], self._dataset_sql(dataset), key_column)
 
     def _collect_rule_source_keys(self, source_config: dict[str, Any], key_column: str, connections: dict[int, Connection]) -> set[str]:
         connection = connections[int(source_config["source_connection_id"])]
         if connection.connection_type.value == "csv":
             return self._collect_keys_duckdb(self._rule_source_relation_builder(source_config, connections), key_column)
-        return self._collect_keys_oracle(connection, self.connector_service.oracle_rule_source_sql(source_config), key_column)
+        return self._collect_keys_database(connection, self.connector_service.rule_source_sql(source_config), key_column)
 
     def _collect_keys_duckdb(self, build_relation: RelationBuilder, key_column: str) -> set[str]:
         quoted_key = self._quote_identifier(key_column)
@@ -359,7 +421,7 @@ class ExecutionService:
         finally:
             con.close()
 
-    def _collect_keys_oracle(self, connection: Connection, source_sql: str, key_column: str) -> set[str]:
+    def _collect_keys_database(self, connection: Connection, source_sql: str, key_column: str) -> set[str]:
         quoted_key = self._quote_identifier(key_column)
         db_conn = self.connector_service.connect_database(connection)
         try:
@@ -382,7 +444,7 @@ class ExecutionService:
 
     # --- SQL building ---------------------------------------------------------
 
-    def _oracle_dataset_sql(self, dataset: Dataset) -> str:
+    def _dataset_sql(self, dataset: Dataset) -> str:
         if dataset.dataset_type == DatasetType.ORACLE_SQL:
             return dataset.config["sql"]
         return f"SELECT * FROM {dataset.config['table_name']}"
@@ -419,26 +481,17 @@ class ExecutionService:
                 value = int(value)
         return str(value)
 
+    def _dialect(self, dialect: str) -> DialectSupport:
+        return DIALECTS.get(dialect, DIALECTS["duckdb"])
+
     def _text_expr(self, column_sql: str, dialect: str) -> str:
-        if dialect == "oracle":
-            return f"TO_CHAR({column_sql})"
-        if dialect == "sqlserver":
-            return f"CAST({column_sql} AS NVARCHAR(4000))"
-        if dialect in {"db2", "sybase"}:
-            return f"CAST({column_sql} AS VARCHAR(4000))"
-        return f"CAST({column_sql} AS VARCHAR)"
+        return self._dialect(dialect).text_expr.format(column=column_sql)
 
     def _length_expr(self, text_sql: str, dialect: str) -> str:
-        if dialect in {"sqlserver", "sybase"}:
-            return f"LEN({text_sql})"
-        return f"length({text_sql})"
+        return f"{self._dialect(dialect).length_function}({text_sql})"
 
     def _summary_from_clause(self, dialect: str) -> str:
-        if dialect == "oracle":
-            return " FROM dual"
-        if dialect == "db2":
-            return " FROM SYSIBM.SYSDUMMY1"
-        return ""
+        return self._dialect(dialect).summary_from_clause
 
     def _build_rule_sql(self, rule: Rule, relation_name: str, dialect: str = "duckdb") -> tuple[str, str]:
         errors = validate_rule_config(rule.rule_type, rule.config)
@@ -468,17 +521,15 @@ class ExecutionService:
             max_value = self._sql_number(config["max"], "max")
             failed_sql = f"SELECT * FROM {relation_name} WHERE {column} < {min_value} OR {column} > {max_value}"
         elif rule.rule_type == RuleType.REGEX:
-            if dialect == "sqlserver":
-                raise ValueError("Regex rules are not supported on SQL Server sources.")
-            if dialect == "sybase":
-                raise ValueError("Regex rules are not supported on Sybase sources.")
+            support = self._dialect(dialect)
+            if support.regex_fail_predicate is None:
+                raise ValueError(f"Regex rules are not supported on {support.label} sources.")
             column = self._quote_identifier(config["column"])
-            pattern = self._escape_literal(config["pattern"])
-            text_column = self._text_expr(column, dialect)
-            if dialect in {"oracle", "db2"}:
-                failed_sql = f"SELECT * FROM {relation_name} WHERE NOT REGEXP_LIKE({text_column}, {pattern})"
-            else:
-                failed_sql = f"SELECT * FROM {relation_name} WHERE NOT regexp_matches({text_column}, {pattern})"
+            predicate = support.regex_fail_predicate.format(
+                text_column=self._text_expr(column, dialect),
+                pattern=self._escape_literal(config["pattern"]),
+            )
+            failed_sql = f"SELECT * FROM {relation_name} WHERE {predicate}"
         elif rule.rule_type == RuleType.LENGTH:
             column = self._quote_identifier(config["column"])
             min_length = int(config.get("min_length", 0))
@@ -495,23 +546,16 @@ class ExecutionService:
             text_column = self._text_expr(column, dialect)
             failed_sql = f"SELECT * FROM {relation_name} WHERE {text_column} NOT IN ({values})"
         elif rule.rule_type == RuleType.DATE_VALIDITY:
+            support = self._dialect(dialect)
+            if support.date_fail_predicate is None:
+                raise ValueError(
+                    f"Date validity rules are not supported on {support.label} sources; use a custom SQL rule instead."
+                )
             column = self._quote_identifier(config["column"])
-            if dialect == "oracle":
-                failed_sql = (
-                    f"SELECT * FROM {relation_name} WHERE {column} IS NULL "
-                    f"OR VALIDATE_CONVERSION({column} AS DATE) = 0"
-                )
-            elif dialect == "sqlserver":
-                failed_sql = (
-                    f"SELECT * FROM {relation_name} WHERE {column} IS NULL "
-                    f"OR TRY_CONVERT(date, {self._text_expr(column, dialect)}) IS NULL"
-                )
-            elif dialect == "db2":
-                raise ValueError("Date validity rules are not supported on DB2 sources; use a custom SQL rule instead.")
-            elif dialect == "sybase":
-                raise ValueError("Date validity rules are not supported on Sybase sources; use a custom SQL rule instead.")
-            else:
-                failed_sql = f"SELECT * FROM {relation_name} WHERE try_cast({column} AS DATE) IS NULL"
+            predicate = support.date_fail_predicate.format(
+                column=column, text_column=self._text_expr(column, dialect)
+            )
+            failed_sql = f"SELECT * FROM {relation_name} WHERE {column} IS NULL OR {predicate}"
         elif rule.rule_type == RuleType.CUSTOM_SQL_FAIL_ROWS:
             failed_sql = config["sql"]
         elif rule.rule_type == RuleType.CUSTOM_SQL_THRESHOLD:

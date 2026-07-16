@@ -28,6 +28,10 @@ class ProjectContext:
     def exports_dir(self) -> Path:
         return self.project_dir / "exports"
 
+    @property
+    def uploads_dir(self) -> Path:
+        return self.project_dir / "uploads"
+
 
 def ensure_app_home() -> None:
     APP_HOME.mkdir(parents=True, exist_ok=True)
@@ -50,6 +54,7 @@ def open_or_create_project(project_dir: Path) -> ProjectContext:
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "results").mkdir(exist_ok=True)
     (project_dir / "exports").mkdir(exist_ok=True)
+    (project_dir / "uploads").mkdir(exist_ok=True)
     storage = Storage(project_dir / PROJECT_DB)
     storage.initialize()
     return ProjectContext(project_dir=project_dir, storage=storage)

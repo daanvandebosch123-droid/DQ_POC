@@ -15,7 +15,8 @@
 - `services.connectors`: Oracle/CSV connection handling and previews
 - `services.rules`: built-in rule metadata and persistence helpers
 - `services.execution`: batch rule execution, summaries, preview rows, and exports
-- `web_app`: NiceGUI shell for project management, connections, rules, execution, and results
+- `services.scheduling`: pure cadence math (next-run computation, human-readable descriptions) for the rule scheduler
+- `web_app`: NiceGUI shell for project management, connections, rules, execution, results, and the scheduler UI/background loop
 
 ## Shared project model
 
@@ -27,6 +28,7 @@ The shared SQLite project holds:
 - rules
 - run history
 - rule results
+- schedules (which rule/group, cadence, next/last run)
 - sharing metadata
 - tags as lightweight fields
 

@@ -25,6 +25,9 @@ sqlserver = [
 db2 = [
   "pyodbc>=5.0",
 ]
+sybase = [
+  "pyodbc>=5.0",
+]
 
 [project.scripts]
 dqtool = "dqtool.app:main"

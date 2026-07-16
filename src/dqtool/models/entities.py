@@ -36,6 +36,17 @@ class DatasetType(StrEnum):
     APP_JOIN = "app_join"
 
 
+class ScheduleTargetKind(StrEnum):
+    RULE = "rule"
+    GROUP = "group"
+
+
+class ScheduleCadence(StrEnum):
+    HOURLY = "hourly"
+    DAILY = "daily"
+    WEEKLY = "weekly"
+
+
 class RuleType(StrEnum):
     NOT_NULL = "not_null"
     UNIQUE = "unique"
@@ -134,6 +145,31 @@ class RuleRun:
     finished_at: str | None = None
     summary_json: dict[str, Any] = field(default_factory=dict)
     failed_rows_path: str | None = None
+
+
+@dataclass(slots=True)
+class Schedule:
+    """An automatic run of a single rule or an entire rule group.
+
+    Cadence fields are interpreted based on `cadence`: HOURLY uses `interval_hours`,
+    DAILY uses `time_of_day`, WEEKLY uses `time_of_day` and `weekday` (0=Monday..6=Sunday).
+    The scheduler only fires while the DQTool app process itself is running.
+    """
+
+    id: int | None
+    name: str
+    target_kind: ScheduleTargetKind
+    target_id: int
+    cadence: ScheduleCadence
+    interval_hours: int = 1
+    time_of_day: str = "00:00"
+    weekday: int = 0
+    enabled: bool = True
+    owner_username: str = ""
+    last_run_at: str | None = None
+    next_run_at: str | None = None
+    last_status: str | None = None
+    updated_at: str | None = None
 
 
 def utc_now() -> str:

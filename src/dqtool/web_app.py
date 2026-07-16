@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
 import os
 import re
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi.responses import RedirectResponse
 from nicegui import app as nicegui_app
+from nicegui import events
 from nicegui import run as nicegui_run
 from nicegui import ui
 
@@ -23,8 +25,12 @@ from dqtool.models.entities import (
     RuleGroup,
     RuleRun,
     RuleType,
+    Schedule,
+    ScheduleCadence,
+    ScheduleTargetKind,
     User,
     WorkspaceRole,
+    utc_now,
 )
 from dqtool.services.ai import OllamaService
 from dqtool.services.connectors import ConnectorService
@@ -47,6 +53,7 @@ from dqtool.services.rules import (
     resolve_group_rules,
     validate_rule_config,
 )
+from dqtool.services.scheduling import WEEKDAY_NAMES, compute_next_run, describe_cadence
 from dqtool.services.workspace import (
     DEFAULT_ADMIN_PASSWORD,
     DEFAULT_ADMIN_USERNAME,
@@ -145,10 +152,12 @@ class DQToolWebApp:
         self.users_table: ui.table
         self.preview_table: ui.table
         self.failed_rows_table: ui.table
+        self.schedules_table: ui.table
 
         self.connection_select: ui.select
         self.item_select: ui.select
         self.run_checked_button: ui.button
+        self.schedule_select: ui.select
         self.overview_search: ui.input
         self.results_search: ui.input
         self.result_rule_select: ui.select
@@ -414,6 +423,7 @@ class DQToolWebApp:
                         dashboard_tab = ui.tab("Dashboard", icon="dashboard").classes("justify-start")
                         connections_tab = ui.tab("Connections", icon="cable").classes("justify-start")
                         rules_tab = ui.tab("Rules", icon="rule").classes("justify-start")
+                        schedules_tab = ui.tab("Schedules", icon="schedule").classes("justify-start")
                         results_tab = ui.tab("Results", icon="task_alt").classes("justify-start")
                         anomalies_tab = ui.tab("Anomalies", icon="troubleshoot").classes("justify-start")
                         users_tab = ui.tab("Users", icon="group").classes("justify-start")
@@ -537,6 +547,9 @@ class DQToolWebApp:
 
                         with ui.tab_panel(rules_tab):
                             self._build_rules_tab()
+
+                        with ui.tab_panel(schedules_tab):
+                            self._build_schedules_tab()
 
                         with ui.tab_panel(results_tab):
                             self._build_results_tab()
@@ -714,6 +727,71 @@ class DQToolWebApp:
                         :color="props.row.visibility === 'private' ? 'grey-6' : (props.row.visibility === 'shared' ? 'positive' : 'warning')"
                         text-color="white"
                         :label="props.row.visibility"
+                    />
+                </q-td>
+                """,
+            )
+
+    def _build_schedules_tab(self) -> None:
+        with ui.card().classes("dq-soft-card dq-section-card w-full p-6"):
+            with ui.row().classes("w-full items-start justify-between gap-4 flex-wrap"):
+                with ui.column().classes("gap-1"):
+                    ui.label("AUTOMATION").classes("dq-eyebrow")
+                    ui.label("Schedules").classes("dq-panel-title text-2xl font-bold")
+                    ui.label(
+                        "Run a rule or rule group automatically. Times are UTC; the scheduler checks every "
+                        "minute, and only fires while the DQTool app process itself is running."
+                    ).classes("dq-panel-copy text-sm")
+                with ui.row().classes("items-end gap-2 flex-wrap grow justify-end"):
+                    self.schedule_select = ui.select(options={}, label="Selected schedule").props(
+                        "outlined dense"
+                    ).classes("grow min-w-[230px] max-w-[380px]")
+                    self.schedule_select.on_value_change(self._on_schedule_select_change)
+                    ui.button("Add schedule", icon="add", on_click=lambda: self.show_schedule_dialog()).props(
+                        "color=primary unelevated no-caps"
+                    )
+                    ui.button("Edit", icon="edit", on_click=self.edit_selected_schedule).props("outline no-caps")
+                    ui.button(
+                        "Enable/Disable", icon="power_settings_new", on_click=self.toggle_selected_schedule
+                    ).props("outline no-caps")
+                    ui.button("Run now", icon="play_arrow", on_click=self.run_selected_schedule_now).props(
+                        "color=secondary unelevated no-caps"
+                    )
+                    ui.button("Delete", icon="delete", on_click=self.delete_selected_schedule).props(
+                        "outline no-caps color=negative"
+                    )
+            self.schedules_table = ui.table(
+                columns=self._columns(
+                    ["ID", "Name", "Target", "Cadence", "Enabled", "Next Run", "Last Run", "Last Status"]
+                ),
+                rows=[],
+                row_key="key",
+                pagination=10,
+            ).props("flat bordered wrap-cells").classes("dq-table-wrap w-full mt-4")
+            self.schedules_table.classes(add="dq-selectable-table")
+            self.schedules_table.on("rowClick", self._select_schedule_row)
+            self.schedules_table.add_slot(
+                "body-cell-last_status",
+                r"""
+                <q-td key="last_status" :props="props">
+                    <q-badge
+                        v-if="props.row.last_status !== '-'"
+                        :color="props.row.last_status === 'PASSED' ? 'positive' : (props.row.last_status === 'FAILED' ? 'negative' : 'warning')"
+                        text-color="white"
+                        :label="props.row.last_status"
+                    />
+                    <span v-else>-</span>
+                </q-td>
+                """,
+            )
+            self.schedules_table.add_slot(
+                "body-cell-enabled",
+                r"""
+                <q-td key="enabled" :props="props">
+                    <q-badge
+                        :color="props.row.enabled === 'Yes' ? 'positive' : 'grey-6'"
+                        text-color="white"
+                        :label="props.row.enabled"
                     />
                 </q-td>
                 """,
@@ -1232,6 +1310,7 @@ class DQToolWebApp:
         self._populate_dashboard()
         self._populate_connections()
         self._populate_rules_and_groups()
+        self._populate_schedules()
         self._populate_results()
         self._populate_users()
         self._populate_project_members()
@@ -1286,8 +1365,14 @@ class DQToolWebApp:
             ).classes("w-full")
 
             async def browse_csv_file() -> None:
+                if not self.project:
+                    ui.notify("Open a project first.", type="warning")
+                    return
                 selected_path = await pick_server_path(
-                    str(csv_file_path.value or ""), directories_only=False, extensions=(".csv",)
+                    str(csv_file_path.value or self.project.uploads_dir),
+                    directories_only=False,
+                    extensions=(".csv",),
+                    root=self.project.uploads_dir,
                 )
                 if selected_path is None:
                     return
@@ -1298,6 +1383,62 @@ class DQToolWebApp:
                 if not (name.value or "").strip():
                     name.value = selected_path.stem
                     name.update()
+
+            def finish_csv_upload(target_path: Path, content: bytes, original_name: str) -> None:
+                with target_path.open("wb") as handle:
+                    handle.write(content)
+                csv_file_path.value = str(target_path)
+                csv_file_path.update()
+                selected_csv_label.text = f"Uploaded file: {target_path.name}"
+                selected_csv_label.update()
+                if not (name.value or "").strip():
+                    name.value = target_path.stem
+                    name.update()
+                csv_uploader.reset()
+                ui.notify(f"Uploaded {original_name} to the project's uploads folder.", type="positive")
+
+            def confirm_overwrite(target_path: Path, content: bytes, original_name: str) -> None:
+                with ui.dialog() as overwrite_dialog, ui.card().classes("w-[440px] max-w-full"):
+                    ui.label("File already exists").classes("text-xl font-semibold")
+                    ui.label(
+                        f"'{original_name}' already exists in this project's uploads folder. Overwrite it with the file you just uploaded?"
+                    ).classes("text-sm")
+
+                    def do_overwrite() -> None:
+                        overwrite_dialog.close()
+                        finish_csv_upload(target_path, content, original_name)
+
+                    def do_cancel() -> None:
+                        overwrite_dialog.close()
+                        csv_uploader.reset()
+                        ui.notify("Upload canceled; the existing file was kept.", type="warning")
+
+                    with ui.row().classes("justify-end gap-2 w-full"):
+                        ui.button("Cancel", on_click=do_cancel).props("flat")
+                        ui.button("Overwrite", icon="warning", on_click=do_overwrite).props(
+                            "color=negative unelevated"
+                        )
+                overwrite_dialog.open()
+
+            async def handle_csv_upload(event: events.UploadEventArguments) -> None:
+                if not self.project:
+                    ui.notify("Open a project first.", type="warning")
+                    return
+                # NiceGUI already strips directory components from event.file.name; Path(...).name
+                # here is just defense in depth against a client sending something unexpected.
+                safe_name = Path(event.file.name).name
+                if not safe_name.lower().endswith(".csv"):
+                    ui.notify("Only .csv files can be uploaded.", type="warning")
+                    csv_uploader.reset()
+                    return
+                uploads_dir = self.project.uploads_dir
+                uploads_dir.mkdir(parents=True, exist_ok=True)
+                target_path = uploads_dir / safe_name
+                content = await event.file.read()
+                if target_path.exists():
+                    confirm_overwrite(target_path, content, safe_name)
+                else:
+                    finish_csv_upload(target_path, content, safe_name)
 
             existing_csv_file = str(existing_config.get("file_path", "")) if existing else ""
             with ui.column().classes("w-full gap-1") as csv_picker:
@@ -1310,6 +1451,16 @@ class DQToolWebApp:
                     ui.button("Browse CSV", icon="folder_open", on_click=browse_csv_file).props(
                         "color=primary unelevated no-caps"
                     )
+                ui.label("Browse only shows files already in this project's uploads folder.").classes(
+                    "text-xs text-[#837d74]"
+                )
+                csv_uploader = ui.upload(
+                    label="Or upload a CSV from your computer (saved into the project's uploads folder)",
+                    on_upload=handle_csv_upload,
+                    auto_upload=True,
+                    max_files=1,
+                    max_file_size=200_000_000,
+                ).props('accept=".csv" flat bordered').classes("w-full")
                 selected_csv_label = ui.label(
                     f"Selected file: {Path(existing_csv_file).name}" if existing_csv_file else "No CSV file selected."
                 ).classes("text-xs text-[#837d74]")
@@ -2326,6 +2477,250 @@ class DQToolWebApp:
                 ui.button("Cancel", on_click=dialog.close).props("flat")
                 ui.button("Save", on_click=save).props("color=primary")
         dialog.open()
+
+    def show_schedule_dialog(self, existing: Schedule | None = None) -> None:
+        if not self.project:
+            ui.notify("Open a project first.", type="warning")
+            return
+        with ui.dialog() as dialog, ui.card().classes("dq-scroll-dialog w-[560px] max-w-full gap-1"):
+            ui.label("EDIT SCHEDULE" if existing else "NEW SCHEDULE").classes("dq-eyebrow")
+            ui.label("Edit schedule" if existing else "Create a schedule").classes("dq-panel-title text-2xl font-bold")
+            name = ui.input("Name", value=existing.name if existing else "").classes("w-full")
+
+            target_kind = ui.select(
+                {ScheduleTargetKind.RULE.value: "Rule", ScheduleTargetKind.GROUP.value: "Rule group"},
+                value=(existing.target_kind.value if existing else ScheduleTargetKind.RULE.value),
+                label="Target type",
+            ).classes("w-full")
+            target_select = ui.select(options={}, label="Target").props("outlined dense").classes("w-full")
+
+            def refresh_target_options() -> None:
+                if target_kind.value == ScheduleTargetKind.GROUP.value:
+                    options = {str(item.id): item.name for item in self._visible_groups() if item.id is not None}
+                else:
+                    options = {str(item.id): item.name for item in self._visible_rules() if item.id is not None}
+                preserve = (
+                    str(existing.target_id)
+                    if existing and existing.target_kind.value == target_kind.value
+                    else target_select.value
+                )
+                target_select.options = options
+                target_select.value = preserve if preserve in options else (next(iter(options), None))
+                target_select.update()
+
+            target_kind.on_value_change(lambda _event: refresh_target_options())
+            refresh_target_options()
+
+            cadence = ui.select(
+                {item.value: item.value.capitalize() for item in ScheduleCadence},
+                value=(existing.cadence.value if existing else ScheduleCadence.DAILY.value),
+                label="Cadence",
+            ).classes("w-full")
+            interval_hours = ui.number(
+                "Every N hours", value=(existing.interval_hours if existing else 1), min=1, format="%.0f"
+            ).classes("w-full")
+            time_of_day = ui.input(
+                "Time (HH:MM, UTC)", value=(existing.time_of_day if existing else "09:00"), placeholder="09:00"
+            ).classes("w-full")
+            weekday = ui.select(
+                dict(enumerate(WEEKDAY_NAMES)),
+                value=(existing.weekday if existing else 0),
+                label="Day of week",
+            ).classes("w-full")
+            enabled = ui.switch("Enabled", value=(existing.enabled if existing else True))
+
+            def sync_cadence_visibility() -> None:
+                selected = str(cadence.value)
+                interval_hours.visible = selected == ScheduleCadence.HOURLY.value
+                time_of_day.visible = selected in {ScheduleCadence.DAILY.value, ScheduleCadence.WEEKLY.value}
+                weekday.visible = selected == ScheduleCadence.WEEKLY.value
+                for element in (interval_hours, time_of_day, weekday):
+                    element.update()
+
+            cadence.on_value_change(lambda _event: sync_cadence_visibility())
+            sync_cadence_visibility()
+
+            def save() -> None:
+                try:
+                    if not target_select.value:
+                        raise ValueError("Choose a target rule or group.")
+                    selected_cadence = ScheduleCadence(cadence.value)
+                    hour, minute = 0, 0
+                    if selected_cadence in {ScheduleCadence.DAILY, ScheduleCadence.WEEKLY}:
+                        time_text = str(time_of_day.value or "").strip()
+                        try:
+                            hour_text, minute_text = time_text.split(":", 1)
+                            hour, minute = int(hour_text), int(minute_text)
+                            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                                raise ValueError
+                        except ValueError:
+                            raise ValueError("Enter a valid time as HH:MM (24-hour, UTC).") from None
+                    schedule = Schedule(
+                        id=existing.id if existing else None,
+                        name=(name.value or "").strip(),
+                        target_kind=ScheduleTargetKind(target_kind.value),
+                        target_id=int(target_select.value),
+                        cadence=selected_cadence,
+                        interval_hours=int(interval_hours.value or 1),
+                        time_of_day=f"{hour:02d}:{minute:02d}",
+                        weekday=int(weekday.value or 0),
+                        enabled=bool(enabled.value),
+                        owner_username=existing.owner_username if existing else self.current_user,
+                        last_run_at=existing.last_run_at if existing else None,
+                        last_status=existing.last_status if existing else None,
+                    )
+                    if not schedule.name:
+                        raise ValueError("Schedule name is required.")
+                    schedule.next_run_at = compute_next_run(schedule, after=datetime.now(UTC)).isoformat()
+                    self.project.storage.save_schedule(schedule)
+                    dialog.close()
+                    self.refresh_all()
+                    self._set_last_action(f"Saved schedule {schedule.name}")
+                    ui.notify(f"Saved schedule {schedule.name}.", type="positive")
+                except Exception as exc:
+                    ui.notify(str(exc), type="negative")
+
+            with ui.row().classes("justify-end gap-2 w-full mt-2"):
+                ui.button("Cancel", on_click=dialog.close).props("flat")
+                ui.button("Save", on_click=save).props("color=primary unelevated")
+        dialog.open()
+
+    def _selected_schedule(self) -> Schedule | None:
+        if not self.project:
+            return None
+        selected_id = self.schedule_select.value
+        if not selected_id:
+            return None
+        schedule_id = int(selected_id)
+        return next((item for item in self.project.storage.list_schedules() if item.id == schedule_id), None)
+
+    def edit_selected_schedule(self) -> None:
+        schedule = self._selected_schedule()
+        if schedule is None:
+            ui.notify("Select a schedule first.", type="warning")
+            return
+        self.show_schedule_dialog(schedule)
+
+    def toggle_selected_schedule(self) -> None:
+        if not self.project:
+            ui.notify("Open a project first.", type="warning")
+            return
+        schedule = self._selected_schedule()
+        if schedule is None:
+            ui.notify("Select a schedule first.", type="warning")
+            return
+        schedule.enabled = not schedule.enabled
+        if schedule.enabled:
+            schedule.next_run_at = compute_next_run(schedule, after=datetime.now(UTC)).isoformat()
+        self.project.storage.save_schedule(schedule)
+        self.refresh_all()
+        state = "enabled" if schedule.enabled else "disabled"
+        self._set_last_action(f"{state.capitalize()} schedule {schedule.name}")
+        ui.notify(f"Schedule '{schedule.name}' {state}.", type="positive")
+
+    async def run_selected_schedule_now(self) -> None:
+        if not self.project:
+            ui.notify("Open a project first.", type="warning")
+            return
+        schedule = self._selected_schedule()
+        if schedule is None:
+            ui.notify("Select a schedule first.", type="warning")
+            return
+        rules_by_id = {item.id: item for item in self._visible_rules() if item.id is not None}
+        groups_by_id = {item.id: item for item in self._visible_groups() if item.id is not None}
+        if schedule.target_kind == ScheduleTargetKind.RULE:
+            rule = rules_by_id.get(schedule.target_id)
+            rules = [rule] if rule is not None else []
+        else:
+            group = groups_by_id.get(schedule.target_id)
+            rules = resolve_group_rules(group, groups_by_id, rules_by_id)[0] if group is not None else []
+        if not rules:
+            ui.notify("The scheduled rule or group no longer exists or is not accessible.", type="warning")
+            return
+        connections = {item.id: item for item in self._visible_connections() if item.id is not None}
+        try:
+            runs = await nicegui_run.io_bound(
+                self.execution_service.run_rules, rules, {}, connections, self.project.results_dir, self.current_user
+            )
+            for run in runs:
+                self.project.storage.save_rule_run(run)
+            passed = sum(1 for run in runs if run.status == "passed")
+            failed = sum(1 for run in runs if run.status == "failed")
+            errored = sum(1 for run in runs if run.status == "error")
+            self.refresh_all()
+            self._set_last_action(f"Ran schedule {schedule.name} on demand")
+            ui.notify(
+                f"Schedule '{schedule.name}': {passed} passed, {failed} failed, {errored} errored ({len(runs)} rule(s)). "
+                "This on-demand run did not change the schedule's next automatic run time.",
+                type="positive" if failed == 0 and errored == 0 else "warning",
+            )
+        except Exception as exc:
+            ui.notify(str(exc), type="negative")
+
+    def delete_selected_schedule(self) -> None:
+        if not self.project:
+            ui.notify("Open a project first.", type="warning")
+            return
+        schedule = self._selected_schedule()
+        if schedule is None:
+            ui.notify("Select a schedule first.", type="warning")
+            return
+
+        def do_delete() -> None:
+            self.project.storage.delete_schedule(int(schedule.id or 0))
+            self.refresh_all()
+            self._set_last_action(f"Deleted schedule {schedule.name}")
+            ui.notify(f"Deleted schedule {schedule.name}.", type="positive")
+
+        self._confirm_delete(f"Delete schedule '{schedule.name}'? This does not delete the rule or group itself.", do_delete)
+
+    def _on_schedule_select_change(self, event: Any) -> None:
+        self._highlight_table_row(self.schedules_table, event.value)
+
+    def _select_schedule_row(self, event: Any) -> None:
+        row = self._row_from_click_event(event)
+        if row is None:
+            return
+        selected_id = str(row["id"])
+        self.schedule_select.value = selected_id
+        self.schedule_select.update()
+        self._highlight_table_row(self.schedules_table, selected_id)
+
+    def _populate_schedules(self) -> None:
+        if not self.project:
+            self.schedules_table.rows = []
+            self.schedules_table.update()
+            self._set_select_options(self.schedule_select, {}, None)
+            return
+        schedules = self.project.storage.list_schedules()
+        rules_by_id = {item.id: item for item in self._visible_rules() if item.id is not None}
+        groups_by_id = {item.id: item for item in self._visible_groups() if item.id is not None}
+        rows: list[dict[str, Any]] = []
+        options: dict[str, str] = {}
+        for schedule in sorted(schedules, key=lambda item: item.name.lower()):
+            if schedule.target_kind == ScheduleTargetKind.RULE:
+                target = rules_by_id.get(schedule.target_id)
+                target_label = f"Rule: {target.name}" if target else "Rule: (deleted)"
+            else:
+                target = groups_by_id.get(schedule.target_id)
+                target_label = f"Group: {target.name}" if target else "Group: (deleted)"
+            rows.append(
+                {
+                    "key": str(schedule.id),
+                    "id": schedule.id,
+                    "name": schedule.name,
+                    "target": target_label,
+                    "cadence": describe_cadence(schedule),
+                    "enabled": "Yes" if schedule.enabled else "No",
+                    "next_run": schedule.next_run_at or "-",
+                    "last_run": schedule.last_run_at or "-",
+                    "last_status": (schedule.last_status or "-").upper(),
+                }
+            )
+            options[str(schedule.id)] = f"{schedule.name} ({target_label})"
+        self.schedules_table.rows = rows
+        self.schedules_table.update()
+        self._set_select_options(self.schedule_select, options, self.schedule_select.value)
 
     def edit_selected_group(self) -> None:
         if not self.project:
@@ -3999,27 +4394,44 @@ async def pick_server_path(
     start: str | Path = "",
     directories_only: bool = True,
     extensions: tuple[str, ...] = (),
+    root: str | Path | None = None,
 ) -> Path | None:
-    """In-browser picker for the server's filesystem, so it also works for remote users."""
-    candidate = Path(str(start)).expanduser() if str(start).strip() else Path.home()
+    """In-browser picker for the server's filesystem, so it also works for remote users.
+
+    When `root` is given, browsing is confined to that directory and its subfolders: the
+    drive selector is hidden and navigating above `root` is blocked.
+    """
+    root_dir: Path | None = None
+    if root is not None:
+        root_dir = Path(str(root)).expanduser().resolve()
+        root_dir.mkdir(parents=True, exist_ok=True)
+
+    def within_root(path: Path) -> bool:
+        return root_dir is None or path == root_dir or root_dir in path.parents
+
+    candidate = Path(str(start)).expanduser() if str(start).strip() else (root_dir or Path.home())
     if candidate.is_file():
         candidate = candidate.parent
     if not candidate.is_dir():
-        candidate = Path.home()
-    state = {"dir": candidate.resolve()}
+        candidate = root_dir or Path.home()
+    candidate = candidate.resolve()
+    if not within_root(candidate):
+        candidate = root_dir or Path.home()
+    state = {"dir": candidate}
 
     with ui.dialog() as dialog, ui.card().classes("w-[560px] max-w-full p-5 gap-2"):
         ui.label("Select a folder" if directories_only else "Select a file").classes("text-lg font-bold")
         path_label = ui.label("").classes("text-xs text-[#837d74] break-all")
         with ui.row().classes("w-full items-center gap-2"):
-            ui.button(icon="arrow_upward", on_click=lambda: navigate(state["dir"].parent)).props(
+            up_button = ui.button(icon="arrow_upward", on_click=lambda: navigate(state["dir"].parent)).props(
                 "flat round dense"
             ).tooltip("Up one level")
-            drives = _list_drives()
-            if len(drives) > 1:
-                ui.select(
-                    drives, label="Drive", on_change=lambda event: navigate(Path(str(event.value)))
-                ).props("outlined dense").classes("w-32")
+            if root_dir is None:
+                drives = _list_drives()
+                if len(drives) > 1:
+                    ui.select(
+                        drives, label="Drive", on_change=lambda event: navigate(Path(str(event.value)))
+                    ).props("outlined dense").classes("w-32")
         entries = ui.column().classes("w-full gap-0 h-[300px] overflow-auto rounded border border-[#e2ded7]")
         with ui.row().classes("w-full justify-end gap-2"):
             ui.button("Cancel", on_click=lambda: dialog.submit(None)).props("flat")
@@ -4031,6 +4443,8 @@ async def pick_server_path(
     def render() -> None:
         path_label.text = str(state["dir"])
         path_label.update()
+        up_button.visible = root_dir is None or state["dir"] != root_dir
+        up_button.update()
         entries.clear()
         try:
             children = sorted(state["dir"].iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
@@ -4056,7 +4470,7 @@ async def pick_server_path(
     def navigate(target: Path) -> None:
         try:
             resolved = Path(target).resolve()
-            if resolved.is_dir():
+            if resolved.is_dir() and within_root(resolved):
                 state["dir"] = resolved
         except OSError:
             return
@@ -4075,6 +4489,103 @@ def open_configured_workspace() -> WorkspaceContext | None:
         return open_or_create_workspace(Path(root))
     except Exception:
         return None
+
+
+# --- rule scheduler -----------------------------------------------------------
+#
+# Runs as a single background asyncio task inside the DQTool server process (see
+# `_start_scheduler` below, hooked into `nicegui.app.on_startup`). It only fires while
+# that process is running — this is not an OS-level scheduled task. Every project in the
+# configured workspace is polled on the same interval, independent of which projects any
+# signed-in user currently has open in a browser.
+
+SCHEDULER_POLL_SECONDS = 60
+
+
+async def _execute_schedule(
+    schedule: Schedule,
+    project: ProjectContext,
+    rules_by_id: dict[int, Rule],
+    groups_by_id: dict[int, RuleGroup],
+    connections: dict[int, Connection],
+    execution_service: ExecutionService,
+) -> None:
+    status = "error"
+    try:
+        if schedule.target_kind == ScheduleTargetKind.RULE:
+            rule = rules_by_id.get(schedule.target_id)
+            rules_to_run = [rule] if rule is not None else []
+        else:
+            group = groups_by_id.get(schedule.target_id)
+            rules_to_run = resolve_group_rules(group, groups_by_id, rules_by_id)[0] if group is not None else []
+        if rules_to_run:
+            runs = await nicegui_run.io_bound(
+                execution_service.run_rules, rules_to_run, {}, connections, project.results_dir, "scheduler"
+            )
+            for run in runs:
+                project.storage.save_rule_run(run)
+            if any(run.status == "error" for run in runs):
+                status = "error"
+            elif any(run.status == "failed" for run in runs):
+                status = "failed"
+            else:
+                status = "passed"
+        # else: the scheduled rule or group was deleted since the schedule was created;
+        # leave status as "error" so that's visible in the Schedules tab.
+    except Exception:
+        status = "error"
+    next_run = compute_next_run(schedule, after=datetime.now(UTC))
+    await nicegui_run.io_bound(
+        project.storage.record_schedule_run, schedule.id, utc_now(), next_run.isoformat(), status
+    )
+
+
+async def _run_due_schedules_for_project(workspace: WorkspaceContext, project_meta: Project) -> None:
+    project_dir = workspace.root_dir / project_meta.folder_name
+    try:
+        project = await nicegui_run.io_bound(open_or_create_project, project_dir)
+    except Exception:
+        return
+    try:
+        due = await nicegui_run.io_bound(project.storage.list_due_schedules, utc_now())
+    except Exception:
+        return
+    if not due:
+        return
+    rules_by_id = {item.id: item for item in project.storage.list_rules() if item.id is not None}
+    groups_by_id = {item.id: item for item in project.storage.list_rule_groups() if item.id is not None}
+    connections = {item.id: item for item in project.storage.list_connections() if item.id is not None}
+    execution_service = ExecutionService(ConnectorService())
+    for schedule in due:
+        await _execute_schedule(schedule, project, rules_by_id, groups_by_id, connections, execution_service)
+
+
+async def _run_due_schedules_once() -> None:
+    workspace = open_configured_workspace()
+    if workspace is None:
+        return
+    try:
+        projects = await nicegui_run.io_bound(workspace.storage.list_projects)
+    except Exception:
+        return
+    for project_meta in projects:
+        await _run_due_schedules_for_project(workspace, project_meta)
+
+
+async def _scheduler_loop() -> None:
+    while True:
+        try:
+            await _run_due_schedules_once()
+        except Exception:
+            pass  # a single bad poll should never kill the background loop
+        await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+
+
+def _start_scheduler() -> None:
+    asyncio.create_task(_scheduler_loop())
+
+
+nicegui_app.on_startup(_start_scheduler)
 
 
 def _session_user() -> tuple[WorkspaceContext, User] | None:

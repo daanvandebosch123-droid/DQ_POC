@@ -18,6 +18,9 @@ from dqtool.models.entities import (
     RuleGroup,
     RuleRun,
     RuleType,
+    Schedule,
+    ScheduleCadence,
+    ScheduleTargetKind,
     User,
     utc_now,
 )
@@ -124,6 +127,23 @@ class Storage:
                     source_key TEXT NOT NULL,
                     profiled_at TEXT NOT NULL,
                     profile_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS schedules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    target_kind TEXT NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    cadence TEXT NOT NULL,
+                    interval_hours INTEGER NOT NULL DEFAULT 1,
+                    time_of_day TEXT NOT NULL DEFAULT '00:00',
+                    weekday INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    owner_username TEXT NOT NULL,
+                    last_run_at TEXT,
+                    next_run_at TEXT,
+                    last_status TEXT,
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -396,6 +416,82 @@ class Storage:
             )
             return int(cursor.lastrowid)
 
+    def list_schedules(self) -> list[Schedule]:
+        return self._list_entity("schedules", self._row_to_schedule)
+
+    def get_schedule(self, schedule_id: int) -> Schedule | None:
+        with self._session() as conn:
+            row = conn.execute("SELECT * FROM schedules WHERE id = ?", (schedule_id,)).fetchone()
+        return self._row_to_schedule(row) if row else None
+
+    def save_schedule(self, schedule: Schedule) -> int:
+        name = self._dedupe_name("schedules", schedule.name, schedule.id)
+        payload = (
+            name,
+            schedule.target_kind.value,
+            schedule.target_id,
+            schedule.cadence.value,
+            int(schedule.interval_hours),
+            schedule.time_of_day,
+            int(schedule.weekday),
+            1 if schedule.enabled else 0,
+            schedule.owner_username,
+            schedule.last_run_at,
+            schedule.next_run_at,
+            schedule.last_status,
+            utc_now(),
+        )
+        with self._session() as conn:
+            if schedule.id is None:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO schedules(
+                        name, target_kind, target_id, cadence, interval_hours, time_of_day, weekday,
+                        enabled, owner_username, last_run_at, next_run_at, last_status, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    payload,
+                )
+                return int(cursor.lastrowid)
+            conn.execute(
+                """
+                UPDATE schedules
+                SET name=?, target_kind=?, target_id=?, cadence=?, interval_hours=?, time_of_day=?, weekday=?,
+                    enabled=?, owner_username=?, last_run_at=?, next_run_at=?, last_status=?, updated_at=?
+                WHERE id=?
+                """,
+                payload + (schedule.id,),
+            )
+            return schedule.id
+
+    def delete_schedule(self, schedule_id: int) -> None:
+        with self._session() as conn:
+            conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+
+    def list_due_schedules(self, now_iso: str) -> list[Schedule]:
+        """Enabled schedules whose next_run_at has arrived (or has no next_run_at set yet)."""
+        with self._session() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM schedules
+                WHERE enabled = 1 AND (next_run_at IS NULL OR next_run_at <= ?)
+                ORDER BY id
+                """,
+                (now_iso,),
+            ).fetchall()
+        return [self._row_to_schedule(row) for row in rows]
+
+    def record_schedule_run(self, schedule_id: int, last_run_at: str, next_run_at: str, last_status: str) -> None:
+        with self._session() as conn:
+            conn.execute(
+                """
+                UPDATE schedules
+                SET last_run_at = ?, next_run_at = ?, last_status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (last_run_at, next_run_at, last_status, utc_now(), schedule_id),
+            )
+
     def save_source_profile(self, source_key: str, profile: dict[str, Any]) -> int:
         with self._session() as conn:
             cursor = conn.execute(
@@ -506,6 +602,24 @@ class Storage:
             allowed_users=json.loads(row["allowed_users_json"]),
             rule_ids=json.loads(row["rule_ids_json"]),
             child_group_ids=json.loads(row["child_group_ids_json"]),
+            updated_at=row["updated_at"],
+        )
+
+    def _row_to_schedule(self, row: sqlite3.Row) -> Schedule:
+        return Schedule(
+            id=row["id"],
+            name=row["name"],
+            target_kind=ScheduleTargetKind(row["target_kind"]),
+            target_id=row["target_id"],
+            cadence=ScheduleCadence(row["cadence"]),
+            interval_hours=row["interval_hours"],
+            time_of_day=row["time_of_day"],
+            weekday=row["weekday"],
+            enabled=bool(row["enabled"]),
+            owner_username=row["owner_username"],
+            last_run_at=row["last_run_at"],
+            next_run_at=row["next_run_at"],
+            last_status=row["last_status"],
             updated_at=row["updated_at"],
         )
 

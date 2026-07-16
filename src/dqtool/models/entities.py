@@ -25,6 +25,7 @@ class ConnectionType(StrEnum):
     CSV = "csv"
     SQLSERVER = "sqlserver"
     DB2 = "db2"
+    SYBASE = "sybase"
 
 
 class DatasetType(StrEnum):
@@ -47,6 +48,7 @@ class RuleType(StrEnum):
     DATE_VALIDITY = "date_validity"
     CUSTOM_SQL_FAIL_ROWS = "custom_sql_fail_rows"
     CUSTOM_SQL_THRESHOLD = "custom_sql_threshold"
+    CUSTOM_SQL_CONNECTION = "custom_sql_connection"
     REFERENTIAL_INTEGRITY = "referential_integrity"
     KEYED_COMPARISON = "keyed_comparison"
 

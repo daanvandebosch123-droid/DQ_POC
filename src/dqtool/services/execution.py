@@ -132,9 +132,45 @@ class ExecutionService:
         connections: dict[int, Connection],
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         connection = connections[int(source_config["source_connection_id"])]
+        if rule.rule_type == RuleType.CUSTOM_SQL_CONNECTION:
+            return self._run_connection_sql_rule(rule, connection)
         if connection.connection_type.value == "csv":
             return self._run_duckdb_rule(rule, self._rule_source_relation_builder(source_config, connections))
         return self._run_oracle_rule(rule, connection, self.connector_service.oracle_rule_source_sql(source_config))
+
+    def _run_connection_sql_rule(self, rule: Rule, connection: Connection) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Run rule SQL against the whole connection instead of one selected table.
+
+        Every returned row is a failed row. Because there is no single source relation,
+        checked_count equals failed_count; use the row-count fail threshold for tolerances.
+        """
+        errors = validate_rule_config(rule.rule_type, rule.config)
+        if errors:
+            raise ValueError(f"Invalid {rule.rule_type.value} rule configuration. {'; '.join(errors)}")
+        sql = str(rule.config["sql"]).strip().rstrip(";")
+        if connection.connection_type.value == "csv":
+            con = duckdb.connect()
+            try:
+                self.connector_service.register_connection_views(con, connection)
+                cursor = con.execute(f"SELECT * FROM ({sql}) failed LIMIT {FAILED_ROW_LIMIT}")
+                columns = [column[0] for column in cursor.description]
+                failed_rows = [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
+                failed_count = con.execute(f"SELECT COUNT(*) FROM ({sql}) failed").fetchone()[0]
+            finally:
+                con.close()
+        else:
+            dialect = self.connector_service.database_dialect(connection)
+            db_conn = self.connector_service.connect_database(connection)
+            try:
+                with db_conn.cursor() as cursor:
+                    cursor.execute(self.connector_service.limited_sql(sql, FAILED_ROW_LIMIT, dialect))
+                    columns = [column[0] for column in cursor.description]
+                    failed_rows = [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
+                    cursor.execute(f"SELECT COUNT(*) FROM ({sql}) failed")
+                    failed_count = cursor.fetchone()[0]
+            finally:
+                db_conn.close()
+        return self._summary(rule, failed_count, failed_count), failed_rows
 
     # --- relation builders -------------------------------------------------
 
@@ -388,12 +424,12 @@ class ExecutionService:
             return f"TO_CHAR({column_sql})"
         if dialect == "sqlserver":
             return f"CAST({column_sql} AS NVARCHAR(4000))"
-        if dialect == "db2":
+        if dialect in {"db2", "sybase"}:
             return f"CAST({column_sql} AS VARCHAR(4000))"
         return f"CAST({column_sql} AS VARCHAR)"
 
     def _length_expr(self, text_sql: str, dialect: str) -> str:
-        if dialect == "sqlserver":
+        if dialect in {"sqlserver", "sybase"}:
             return f"LEN({text_sql})"
         return f"length({text_sql})"
 
@@ -434,6 +470,8 @@ class ExecutionService:
         elif rule.rule_type == RuleType.REGEX:
             if dialect == "sqlserver":
                 raise ValueError("Regex rules are not supported on SQL Server sources.")
+            if dialect == "sybase":
+                raise ValueError("Regex rules are not supported on Sybase sources.")
             column = self._quote_identifier(config["column"])
             pattern = self._escape_literal(config["pattern"])
             text_column = self._text_expr(column, dialect)
@@ -470,6 +508,8 @@ class ExecutionService:
                 )
             elif dialect == "db2":
                 raise ValueError("Date validity rules are not supported on DB2 sources; use a custom SQL rule instead.")
+            elif dialect == "sybase":
+                raise ValueError("Date validity rules are not supported on Sybase sources; use a custom SQL rule instead.")
             else:
                 failed_sql = f"SELECT * FROM {relation_name} WHERE try_cast({column} AS DATE) IS NULL"
         elif rule.rule_type == RuleType.CUSTOM_SQL_FAIL_ROWS:
@@ -556,6 +596,8 @@ class ExecutionService:
         return f"Dataset #{rule.dataset_id}" if rule.dataset_id is not None else rule.name
 
     def _validate_connection_kind(self, connection: Connection, source_kind: Any, label: str) -> None:
+        if source_kind == "connection":
+            return
         if connection.connection_type.value == "csv" and source_kind != "csv_file":
             raise ValueError(f"The selected {label} connection is CSV and must use CSV File mode.")
         if connection.connection_type.value != "csv" and source_kind not in {"oracle_table", "oracle_sql"}:

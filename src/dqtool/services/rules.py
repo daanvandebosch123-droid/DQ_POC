@@ -58,6 +58,11 @@ RULE_TEMPLATES: dict[RuleType, dict[str, str]] = {
         "description": "Runs SQL that returns a metric named value, then fails when that metric satisfies the selected comparison against the threshold.",
         "setup": "Write a query returning one numeric column aliased as value, select an operator, and enter the threshold. Example: SELECT COUNT(*) AS value FROM dataset_view WHERE amount < 0.",
     },
+    RuleType.CUSTOM_SQL_CONNECTION: {
+        "name": "Custom SQL (Whole Connection)",
+        "description": "Runs custom SQL against the entire connection instead of one table; every returned row is a failed row.",
+        "setup": "Choose only the connection and write a SELECT that may reference any table in it, including joins across tables. On a CSV connection every file is available as a view named after the file (customers.csv becomes customers). Return only invalid rows.",
+    },
     RuleType.REFERENTIAL_INTEGRITY: {
         "name": "Referential Integrity",
         "description": "Fails source rows whose non-null key does not exist in the selected target source.",
@@ -87,6 +92,9 @@ RULE_CONFIG_EXAMPLES: dict[RuleType, dict] = {
         "operator": ">",
         "threshold": 0,
     },
+    RuleType.CUSTOM_SQL_CONNECTION: {
+        "sql": "SELECT o.* FROM orders o LEFT JOIN customers c ON o.customer_id = c.customer_id WHERE c.customer_id IS NULL",
+    },
     RuleType.REFERENTIAL_INTEGRITY: {
         "source_key": "customer_id",
         "target_connection_id": 2,
@@ -114,6 +122,7 @@ RULE_REQUIRED_CONFIG: dict[RuleType, tuple[str, ...]] = {
     RuleType.DATE_VALIDITY: ("column",),
     RuleType.CUSTOM_SQL_FAIL_ROWS: ("sql",),
     RuleType.CUSTOM_SQL_THRESHOLD: ("sql", "threshold"),
+    RuleType.CUSTOM_SQL_CONNECTION: ("sql",),
     RuleType.REFERENTIAL_INTEGRITY: ("source_key", "target_key"),
     RuleType.KEYED_COMPARISON: ("key_column", "compare_columns", "target_relation"),
 }
@@ -192,6 +201,9 @@ def _validate_source_reference(config: dict, prefix: str) -> list[str]:
         errors.append(f"{label} connection is required.")
 
     source_kind = config.get(kind_key)
+    if source_kind == "connection":
+        # Whole-connection rules need no table or file selection.
+        return errors
     if source_kind not in {"csv_file", "oracle_table", "oracle_sql"}:
         errors.append(f"{label} type is required.")
     elif source_kind == "oracle_sql":

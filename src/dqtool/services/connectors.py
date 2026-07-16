@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,10 @@ class ConnectorService:
             ConnectionType.DB2: (
                 "SELECT TRIM(TABSCHEMA) || '.' || TRIM(TABNAME) FROM SYSCAT.TABLES "
                 "WHERE TYPE IN ('T', 'V') AND TABSCHEMA NOT LIKE 'SYS%' ORDER BY TABSCHEMA, TABNAME"
+            ),
+            ConnectionType.SYBASE: (
+                "SELECT USER_NAME(o.uid) + '.' + o.name FROM sysobjects o "
+                "WHERE o.type IN ('U', 'V') ORDER BY USER_NAME(o.uid), o.name"
             ),
         }
         db_conn = self.connect_database(connection)
@@ -194,11 +199,13 @@ class ConnectorService:
             return self._connect_sqlserver(connection)
         if connection.connection_type == ConnectionType.DB2:
             return self._connect_db2(connection)
+        if connection.connection_type == ConnectionType.SYBASE:
+            return self._connect_sybase(connection)
         raise RuntimeError(f"Unsupported database connection type: {connection.connection_type.value}")
 
     def limited_sql(self, sql: str, limit: int, dialect: str) -> str:
         """Wrap a query so it returns at most `limit` rows, in the dialect's syntax."""
-        if dialect == "sqlserver":
+        if dialect in {"sqlserver", "sybase"}:
             return f"SELECT TOP {int(limit)} * FROM ({sql}) q"
         return f"SELECT * FROM ({sql}) q FETCH FIRST {int(limit)} ROWS ONLY"
 
@@ -235,6 +242,20 @@ class ConnectorService:
         connection_string = (
             f"DRIVER={{{driver}}};DATABASE={database};HOSTNAME={host};PORT={port};"
             f"PROTOCOL=TCPIP;UID={username};PWD={password};"
+        )
+        return pyodbc.connect(connection_string, timeout=10)
+
+    def _connect_sybase(self, connection: Connection):
+        if pyodbc is None:
+            raise RuntimeError("The pyodbc package is not installed. Install it with: pip install pyodbc")
+        username = connection.config.get("username")
+        password = self._database_password(connection, username)
+        driver = connection.config.get("driver") or "Adaptive Server Enterprise"
+        host = connection.config.get("host")
+        port = connection.config.get("port") or 5000
+        database = connection.config.get("database") or ""
+        connection_string = (
+            f"DRIVER={{{driver}}};NA={host},{port};UID={username};PWD={password};DB={database};"
         )
         return pyodbc.connect(connection_string, timeout=10)
 
@@ -280,6 +301,42 @@ class ConnectorService:
             raise RuntimeError("Only CSV connections can be loaded into the local rule engine.")
         csv_path = self._rule_csv_path(connection, source_config)
         return con.sql(f"SELECT * FROM {self._csv_reader(csv_path)}")
+
+    def register_connection_views(self, con: duckdb.DuckDBPyConnection, connection: Connection) -> dict[str, str]:
+        """Expose every CSV file of a connection as a DuckDB view named after the file.
+
+        customers.csv becomes the view `customers`; names are sanitized so they stay
+        valid SQL identifiers. Returns view name -> file path for reference.
+        """
+        if connection.connection_type != ConnectionType.CSV:
+            raise RuntimeError("Only CSV connections can be loaded into the local rule engine.")
+        selected_file = self.csv_connection_file(connection)
+        if selected_file is not None:
+            files = [selected_file]
+        else:
+            base_path = Path(str(connection.config.get("base_path") or ""))
+            if not base_path.is_dir():
+                raise ValueError(f"The CSV folder was not found: {base_path}")
+            files = sorted(base_path.rglob("*.csv"))
+        if not files:
+            raise ValueError("The connection contains no CSV files.")
+        registered: dict[str, str] = {}
+        for file_path in files:
+            view_name = self._view_name_for_file(file_path, registered)
+            con.sql(f'CREATE OR REPLACE VIEW "{view_name}" AS SELECT * FROM {self._csv_reader(file_path)}')
+            registered[view_name] = str(file_path)
+        return registered
+
+    def _view_name_for_file(self, file_path: Path, taken: dict[str, str]) -> str:
+        base = re.sub(r"\W+", "_", file_path.stem, flags=re.UNICODE).strip("_") or "csv"
+        if base[0].isdigit():
+            base = f"t_{base}"
+        candidate = base
+        index = 2
+        while candidate in taken:
+            candidate = f"{base}_{index}"
+            index += 1
+        return candidate
 
     def oracle_rule_source_sql(self, source_config: dict[str, Any]) -> str:
         if source_config.get("source_kind") == "oracle_sql":

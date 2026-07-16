@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -60,7 +61,7 @@ RUN_STATUS_STYLES = {
     "failed": ("Failed", "#dc2626"),
     "error": ("Error", "#d97706"),
 }
-CONNECTION_TYPE_LABELS = {"csv": "CSV", "oracle": "Oracle", "sqlserver": "SQL Server", "db2": "DB2"}
+CONNECTION_TYPE_LABELS = {"csv": "CSV", "oracle": "Oracle", "sqlserver": "SQL Server", "db2": "DB2", "sybase": "Sybase"}
 
 CHART_INK = "#37332e"
 CHART_MUTED = "#837d74"
@@ -104,6 +105,7 @@ class DQToolWebApp:
         self.selected_run_id: str | None = None
         self._overview_all_rows: list[dict[str, Any]] = []
         self._overview_collapsed: set[str] = set()
+        self._checked_rule_keys: set[str] = set()
         self._results_all_rows: list[dict[str, Any]] = []
         self._results_collapsed: set[str] = set()
 
@@ -132,6 +134,7 @@ class DQToolWebApp:
 
         self.members_title: ui.label
         self.members_table: ui.table
+        self.member_project_select: ui.select
         self.member_user_select: ui.select
         self.member_role_select: ui.select
 
@@ -145,6 +148,7 @@ class DQToolWebApp:
 
         self.connection_select: ui.select
         self.item_select: ui.select
+        self.run_checked_button: ui.button
         self.overview_search: ui.input
         self.results_search: ui.input
         self.result_rule_select: ui.select
@@ -623,13 +627,18 @@ class DQToolWebApp:
                     ui.button("Delete", icon="delete", on_click=self.delete_selected_item).props(
                         "outline no-caps color=negative"
                     )
+            with ui.row().classes("w-full items-center justify-end gap-2 mt-2"):
+                ui.label("Check rules below to run just those.").classes("dq-panel-copy text-xs text-[#837d74] grow")
+                self.run_checked_button = ui.button(
+                    "Run selected (0)", icon="playlist_play", on_click=self.run_checked_rules
+                ).props("outline no-caps")
             with ui.row().classes("w-full items-center gap-2 mt-3"):
                 self.overview_search = ui.input(placeholder="Search rules and groups...").props(
                     "outlined dense clearable prepend-icon=search"
                 ).classes("w-full max-w-md")
                 self.overview_search.on_value_change(lambda _event: self._refresh_overview_view())
             self.overview_table = ui.table(
-                columns=self._columns(["ID", "Name", "Kind", "Details", "Owner", "Visibility", "Used In"]),
+                columns=self._columns(["Select", "ID", "Name", "Kind", "Details", "Owner", "Visibility", "Used In"]),
                 rows=[],
                 row_key="key",
                 pagination=10,
@@ -637,6 +646,23 @@ class DQToolWebApp:
             self.overview_table.classes(add="dq-selectable-table")
             self.overview_table.on("rowClick", self._select_overview_row)
             self.overview_table.on("toggle_group", self._on_toggle_group)
+            self.overview_table.on("toggle_rule_check", self._on_toggle_rule_check)
+            # Checkbox lets a specific rule be queued for a batch "Run selected" without changing
+            # the single-item selection used by the Edit/Run/Delete buttons above. Groups have no
+            # checkbox: running a group already runs every rule nested under it.
+            self.overview_table.add_slot(
+                "body-cell-select",
+                r"""
+                <q-td key="select" :props="props" @click.stop>
+                    <q-checkbox
+                        v-if="props.row.kind === 'rule'"
+                        :model-value="props.row.checked"
+                        dense
+                        @update:model-value="() => $parent.$emit('toggle_rule_check', props.row)"
+                    />
+                </q-td>
+                """,
+            )
             # Renders the Name cell with real CSS indentation, a per-kind icon, and (for groups
             # with children) a chevron that collapses/expands the subtree without selecting the row.
             self.overview_table.add_slot(
@@ -1066,9 +1092,12 @@ class DQToolWebApp:
                     ui.label("PROJECT ACCESS").classes("dq-eyebrow")
                     self.members_title = ui.label("Project members").classes("dq-panel-title text-2xl font-bold")
                     ui.label(
-                        "Project admins can add existing accounts to the open project, change their role, or remove them."
+                        "Pick a project you administer, then add existing accounts, change their role, or remove them."
                     ).classes("dq-panel-copy text-sm")
                 with ui.row().classes("items-end gap-2 flex-wrap"):
+                    self.member_project_select = ui.select(
+                        options={}, label="Project", on_change=lambda _event: self._refresh_member_rows()
+                    ).props("outlined dense").classes("min-w-[170px]")
                     self.member_user_select = ui.select(options=[], label="Account", with_input=True).props(
                         "outlined dense"
                     ).classes("min-w-[180px]")
@@ -1188,6 +1217,7 @@ class DQToolWebApp:
                 self.workspace.storage.set_project_members(project.id, member_roles)
                 dialog.close()
                 self._populate_project_options()
+                self._populate_project_members()
                 self.project_select.value = str(project.id)
                 self.project_select.update()
                 self._set_last_action(f"Created project {project.name}")
@@ -1290,6 +1320,7 @@ class DQToolWebApp:
             default_drivers = {
                 ConnectionType.SQLSERVER.value: "ODBC Driver 17 for SQL Server",
                 ConnectionType.DB2.value: "IBM DB2 ODBC DRIVER",
+                ConnectionType.SYBASE.value: "Adaptive Server Enterprise",
             }
             initial_driver = str(existing_config.get("driver", "")) or default_drivers.get(
                 existing.connection_type.value if existing else "", "ODBC Driver 17 for SQL Server"
@@ -1306,6 +1337,7 @@ class DQToolWebApp:
                 ConnectionType.ORACLE.value: 1521,
                 ConnectionType.SQLSERVER.value: 1433,
                 ConnectionType.DB2.value: 50000,
+                ConnectionType.SYBASE.value: 5000,
             }
 
             def sync_visibility() -> None:
@@ -1319,7 +1351,11 @@ class DQToolWebApp:
                 password.visible = is_database
                 service_name.visible = is_oracle
                 tns_alias.visible = is_oracle
-                database_name.visible = selected in {ConnectionType.SQLSERVER.value, ConnectionType.DB2.value}
+                database_name.visible = selected in {
+                    ConnectionType.SQLSERVER.value,
+                    ConnectionType.DB2.value,
+                    ConnectionType.SYBASE.value,
+                }
                 odbc_driver.visible = selected in default_drivers
                 if is_database and port.value in (None, *default_ports.values()):
                     port.value = default_ports.get(selected, 1521)
@@ -1352,7 +1388,7 @@ class DQToolWebApp:
                             "username": (username.value or "").strip(),
                             "tns_alias": (tns_alias.value or "").strip(),
                         }
-                    elif selected_type in {ConnectionType.SQLSERVER, ConnectionType.DB2}:
+                    elif selected_type in {ConnectionType.SQLSERVER, ConnectionType.DB2, ConnectionType.SYBASE}:
                         config = {
                             "host": (host.value or "").strip(),
                             "port": int(port.value or default_ports[selected_type.value]),
@@ -1637,7 +1673,11 @@ class DQToolWebApp:
                 regex_pattern.visible = selected_type == RuleType.REGEX
                 length_fields.visible = selected_type == RuleType.LENGTH
                 allowed_values.visible = selected_type == RuleType.ALLOWED_VALUES
-                rule_sql.visible = selected_type in {RuleType.CUSTOM_SQL_FAIL_ROWS, RuleType.CUSTOM_SQL_THRESHOLD}
+                rule_sql.visible = selected_type in {
+                    RuleType.CUSTOM_SQL_FAIL_ROWS,
+                    RuleType.CUSTOM_SQL_THRESHOLD,
+                    RuleType.CUSTOM_SQL_CONNECTION,
+                }
                 threshold_fields.visible = selected_type == RuleType.CUSTOM_SQL_THRESHOLD
                 target_key_select.visible = selected_type == RuleType.REFERENTIAL_INTEGRITY
                 target_relation.visible = selected_type == RuleType.KEYED_COMPARISON
@@ -1685,8 +1725,13 @@ class DQToolWebApp:
                 sql_field: ui.textarea,
             ) -> None:
                 connection = connections.get(str(connection_select.value))
+                is_connection_rule = (
+                    kind_select is source_kind and RuleType(rule_type.value) == RuleType.CUSTOM_SQL_CONNECTION
+                )
                 if connection is None:
                     options: dict[str, str] = {}
+                elif is_connection_rule:
+                    options = {"connection": "Whole connection"}
                 elif connection.connection_type == ConnectionType.CSV:
                     options = {"csv_file": "CSV File"}
                 else:
@@ -1697,7 +1742,11 @@ class DQToolWebApp:
                 current_kind = str(kind_select.value or "")
                 kind_select.options = options
                 kind_select.value = current_kind if current_kind in options else (next(iter(options), None))
-                kind_select.visible = connection is not None and connection.connection_type != ConnectionType.CSV
+                kind_select.visible = (
+                    connection is not None
+                    and connection.connection_type != ConnectionType.CSV
+                    and not is_connection_rule
+                )
                 kind_select.update()
                 uses_sql = kind_select.value == "oracle_sql"
                 uses_single_csv_file = (
@@ -1705,7 +1754,9 @@ class DQToolWebApp:
                     and connection.connection_type == ConnectionType.CSV
                     and self.connector_service.csv_connection_file(connection) is not None
                 )
-                name_field.visible = bool(kind_select.value) and not uses_sql and not uses_single_csv_file
+                name_field.visible = (
+                    bool(kind_select.value) and not uses_sql and not uses_single_csv_file and not is_connection_rule
+                )
                 sql_field.visible = uses_sql
                 if connection is None:
                     name_field.props["label"] = "CSV file / table *"
@@ -1734,6 +1785,29 @@ class DQToolWebApp:
                     name_select.options = []
                     name_select.value = None
                     status_label.text = "Enter the SQL query in the field below."
+                elif source_kind_value == "connection":
+                    name_select.options = []
+                    name_select.value = None
+                    status_label.text = "Loading what the SQL can reference..."
+                    status_label.update()
+                    try:
+                        targets = await nicegui_run.io_bound(self.connector_service.list_connection_targets, connection)
+                    except Exception as exc:
+                        status_label.text = f"The SQL runs against the whole connection. Could not list its items: {exc}"
+                    else:
+                        if connection.connection_type == ConnectionType.CSV:
+                            names = []
+                            for target in targets:
+                                stem = target.rsplit("/", 1)[-1]
+                                stem = stem[:-4] if stem.lower().endswith(".csv") else stem
+                                cleaned = re.sub(r"\W+", "_", stem).strip("_") or "csv"
+                                names.append(f"t_{cleaned}" if cleaned[0].isdigit() else cleaned)
+                        else:
+                            names = targets
+                        preview = ", ".join(names[:12]) + (" ..." if len(names) > 12 else "")
+                        status_label.text = (
+                            f"The SQL can reference: {preview}" if names else "No tables or files were found on this connection."
+                        )
                 else:
                     selected_csv_file = (
                         self.connector_service.csv_connection_file(connection)
@@ -1775,6 +1849,10 @@ class DQToolWebApp:
                 connection_id = connection_select.value
                 if not connection_id or not kind_select.value:
                     output.content = "Select a connection first."
+                    output.update()
+                    return
+                if kind_select.value == "connection":
+                    output.content = "Whole-connection rules take their fields from the SQL itself."
                     output.update()
                     return
                 config = {
@@ -1847,8 +1925,7 @@ class DQToolWebApp:
 
             async def handle_rule_type_change() -> None:
                 set_example()
-                if source_connection.value and source_kind.value and (source_name.value or source_sql.value):
-                    await refresh_source_rule_columns()
+                await refresh_source_targets()
                 if RuleType(rule_type.value) == RuleType.REFERENTIAL_INTEGRITY:
                     await refresh_target_targets()
 
@@ -1952,7 +2029,7 @@ class DQToolWebApp:
                         merged["max_length"] = int(max_length.value or 0)
                     elif selected_type == RuleType.ALLOWED_VALUES:
                         merged["values"] = self._split_csv_text(allowed_values.value)
-                    elif selected_type == RuleType.CUSTOM_SQL_FAIL_ROWS:
+                    elif selected_type in {RuleType.CUSTOM_SQL_FAIL_ROWS, RuleType.CUSTOM_SQL_CONNECTION}:
                         merged["sql"] = str(rule_sql.value or "").strip()
                     elif selected_type == RuleType.CUSTOM_SQL_THRESHOLD:
                         merged["sql"] = str(rule_sql.value or "").strip()
@@ -2060,6 +2137,7 @@ class DQToolWebApp:
                 dialog.close()
                 self._populate_users()
                 self._populate_project_options()
+                self._populate_project_members()
                 self._set_last_action(f"Saved user {value}")
                 ui.notify(f"Saved user {value} ({role.value}).", type="positive")
 
@@ -2435,6 +2513,70 @@ class DQToolWebApp:
             self.refresh_all()
             self._set_last_action(f"Ran rule {rule.name}")
             self._notify_run_outcome(rule, runs[0])
+        except Exception as exc:
+            ui.notify(str(exc), type="negative")
+
+    async def run_checked_rules(self) -> None:
+        if not self.project:
+            ui.notify("Open a project first.", type="warning")
+            return
+        if not self._checked_rule_keys:
+            ui.notify("Check at least one rule below first.", type="warning")
+            return
+        rules_by_id = {rule.id: rule for rule in self._visible_rules() if rule.id is not None}
+        checked_ids = [int(key.split(":", 1)[1]) for key in self._checked_rule_keys]
+        rules = [rules_by_id[rule_id] for rule_id in checked_ids if rule_id in rules_by_id]
+        missing = len(checked_ids) - len(rules)
+        if not rules:
+            ui.notify("None of the checked rules are accessible anymore.", type="warning")
+            return
+        self._confirm_run_checked_rules(rules, missing)
+
+    def _confirm_run_checked_rules(self, rules: list[Rule], missing: int) -> None:
+        preview_names = [rule.name for rule in rules[:8]]
+        preview = ", ".join(preview_names)
+        if len(rules) > 8:
+            preview += f", and {len(rules) - 8} more"
+        message = f"Run {len(rules)} selected rule(s)? {preview}."
+        if missing:
+            message += f" Will skip {missing} deleted or inaccessible rule(s)."
+
+        with ui.dialog() as dialog, ui.card().classes("w-[560px] max-w-full"):
+            ui.label("Run selected rules").classes("text-xl font-semibold")
+            ui.label(message).classes("text-sm")
+
+            async def confirm() -> None:
+                dialog.close()
+                await self._execute_checked_rules(rules, missing)
+
+            with ui.row().classes("justify-end gap-2 w-full"):
+                ui.button("Cancel", on_click=dialog.close).props("flat")
+                ui.button("Run", icon="playlist_play", on_click=confirm).props("color=secondary unelevated")
+        dialog.open()
+
+    async def _execute_checked_rules(self, rules: list[Rule], missing: int) -> None:
+        connections = {connection.id: connection for connection in self._visible_connections() if connection.id is not None}
+        try:
+            runs = await nicegui_run.io_bound(
+                self.execution_service.run_rules,
+                rules,
+                {},
+                connections,
+                self.project.results_dir,
+                self.current_user,
+            )
+            for run in runs:
+                self.project.storage.save_rule_run(run)
+            self._checked_rule_keys.clear()
+            self.refresh_all()
+            self._set_last_action(f"Ran {len(runs)} selected rule(s)")
+            passed = sum(1 for run in runs if run.status == "passed")
+            failed = sum(1 for run in runs if run.status == "failed")
+            errored = sum(1 for run in runs if run.status == "error")
+            message = f"Selected rules: {passed} passed, {failed} failed, {errored} errored ({len(runs)} rule(s))."
+            if missing:
+                message += f" Skipped {missing} deleted or inaccessible rule(s)."
+            ui.notify(message, type="positive" if failed == 0 and errored == 0 else "warning")
         except Exception as exc:
             ui.notify(str(exc), type="negative")
 
@@ -2952,6 +3094,7 @@ class DQToolWebApp:
                     "owner": rule.owner_username,
                     "visibility": rule.visibility,
                     "used_in": ", ".join(used_in) if used_in else "-",
+                    "checked": f"rule:{rule.id}" in self._checked_rule_keys,
                 }
             )
 
@@ -2992,6 +3135,10 @@ class DQToolWebApp:
             if row["stable_key"] not in options:
                 prefix = "\U0001f4c1 " if row["kind"] == "group" else ""
                 options[row["stable_key"]] = f"{prefix}{row['name']} ({row['details']})"
+
+        # Drop checkmarks for rules that were deleted or became inaccessible since last checked.
+        existing_rule_keys = {row["stable_key"] for row in rows if row["kind"] == "rule"}
+        self._checked_rule_keys &= existing_rule_keys
 
         self._overview_all_rows = rows
         self._set_item_select_options(options)
@@ -3266,23 +3413,47 @@ class DQToolWebApp:
         self.users_table.rows = rows
         self.users_table.update()
 
+    def _administered_projects(self) -> list[Project]:
+        """Projects where the signed-in user may manage members."""
+        if not self.workspace or not self.signed_in:
+            return []
+        projects = self.workspace.storage.projects_for_user(self.current_user)
+        if self.workspace_role == WorkspaceRole.WORKSPACE_ADMIN:
+            return projects
+        return [
+            project
+            for project in projects
+            if project.id is not None
+            and self.workspace.storage.role_in_project(self.current_user, project.id) == Role.ADMIN
+        ]
+
     def _populate_project_members(self) -> None:
-        can_manage = (
-            self.workspace is not None
-            and self.signed_in
-            and self.current_project is not None
-            and self.current_role == Role.ADMIN
-        )
-        if not can_manage:
-            self.members_title.text = "Project members (open a project you administer)"
+        projects = self._administered_projects()
+        options = {str(project.id): project.name for project in projects}
+        current = str(self.member_project_select.value) if self.member_project_select.value else None
+        if current not in options:
+            if self.current_project is not None and str(self.current_project.id) in options:
+                current = str(self.current_project.id)
+            else:
+                current = next(iter(options), None)
+        self.member_project_select.options = options
+        self.member_project_select.value = current
+        self.member_project_select.update()
+        self._refresh_member_rows()
+
+    def _refresh_member_rows(self) -> None:
+        options = self.member_project_select.options or {}
+        value = str(self.member_project_select.value) if self.member_project_select.value else None
+        if not self.workspace or not self.signed_in or not value or value not in options:
+            self.members_title.text = "Project members"
             self.members_table.rows = []
             self.members_table.update()
             self.member_user_select.options = []
             self.member_user_select.update()
             return
         storage = self.workspace.storage
-        self.members_title.text = f"Members of {self.current_project.name}"
-        members = storage.list_project_members(self.current_project.id)
+        self.members_title.text = f"Members of {options[value]}"
+        members = storage.list_project_members(int(value))
         self.members_table.rows = [
             {"id": index + 1, "username": username, "project_role": role.value}
             for index, (username, role) in enumerate(sorted(members.items()))
@@ -3293,44 +3464,58 @@ class DQToolWebApp:
         ]
         self.member_user_select.update()
 
+    def _selected_member_project(self) -> tuple[int, str] | None:
+        """The project selected in the members card, verified against the user's admin rights."""
+        if not self.workspace or not self.signed_in:
+            return None
+        value = self.member_project_select.value
+        if not value:
+            return None
+        project_id = int(value)
+        if self.workspace.storage.role_in_project(self.current_user, project_id) != Role.ADMIN:
+            return None
+        name = (self.member_project_select.options or {}).get(str(value), "project")
+        return project_id, name
+
     def save_project_member(self) -> None:
-        if not self._can_manage_members():
+        selected = self._selected_member_project()
+        if selected is None:
+            ui.notify("Pick a project you administer first.", type="warning")
             return
-        username = self.member_user_select.value
+        project_id, project_name = selected
+        username = str(self.member_user_select.value or "").strip()
         if not username:
             ui.notify("Pick an account first.", type="warning")
             return
-        if self.workspace.storage.get_user(str(username)) is None:
-            ui.notify("That account does not exist. The Workspace Admin can create it first.", type="warning")
+        target = self.workspace.storage.get_user(username)
+        if target is None:
+            ui.notify("That account does not exist. The Workspace Admin can create it with 'Add user'.", type="warning")
+            return
+        if target.role == WorkspaceRole.WORKSPACE_ADMIN:
+            ui.notify("Workspace Admins already have access to every project.", type="info")
             return
         role = Role(self.member_role_select.value)
-        self.workspace.storage.set_project_member(self.current_project.id, str(username), role)
-        self._populate_project_members()
+        self.workspace.storage.set_project_member(project_id, username, role)
+        self._refresh_member_rows()
         self._populate_users()
-        self._set_last_action(f"Set {username} as {role.value} in {self.current_project.name}")
-        ui.notify(f"{username} is now {role.value} in {self.current_project.name}.", type="positive")
+        self._set_last_action(f"Set {username} as {role.value} in {project_name}")
+        ui.notify(f"{username} is now {role.value} in {project_name}.", type="positive")
 
     def remove_project_member(self) -> None:
-        if not self._can_manage_members():
+        selected = self._selected_member_project()
+        if selected is None:
+            ui.notify("Pick a project you administer first.", type="warning")
             return
-        username = self.member_user_select.value
+        project_id, project_name = selected
+        username = str(self.member_user_select.value or "").strip()
         if not username:
             ui.notify("Pick an account first.", type="warning")
             return
-        self.workspace.storage.remove_project_member(self.current_project.id, str(username))
-        self._populate_project_members()
+        self.workspace.storage.remove_project_member(project_id, username)
+        self._refresh_member_rows()
         self._populate_users()
-        self._set_last_action(f"Removed {username} from {self.current_project.name}")
-        ui.notify(f"Removed {username} from {self.current_project.name}.", type="positive")
-
-    def _can_manage_members(self) -> bool:
-        if not self.workspace or not self.signed_in or not self.current_project:
-            ui.notify("Open a project first.", type="warning")
-            return False
-        if self.current_role != Role.ADMIN:
-            ui.notify("Only project admins can manage members of this project.", type="warning")
-            return False
-        return True
+        self._set_last_action(f"Removed {username} from {project_name}")
+        ui.notify(f"Removed {username} from {project_name}.", type="positive")
 
     def _select_member_row(self, event: Any) -> None:
         row = event.args[1] if len(event.args) > 1 else None
@@ -3518,9 +3703,18 @@ class DQToolWebApp:
     def _refresh_overview_view(self) -> None:
         for row in self._overview_all_rows:
             row["collapsed"] = row["stable_key"] in self._overview_collapsed
+            if row["kind"] == "rule":
+                row["checked"] = row["stable_key"] in self._checked_rule_keys
         self.overview_table.rows = self._visible_overview_rows()
         self.overview_table.update()
         self._highlight_overview_row()
+        self._update_run_checked_button()
+
+    def _update_run_checked_button(self) -> None:
+        if not hasattr(self, "run_checked_button"):
+            return
+        self.run_checked_button.text = f"Run selected ({len(self._checked_rule_keys)})"
+        self.run_checked_button.update()
 
     def _visible_overview_rows(self) -> list[dict[str, Any]]:
         query = (self.overview_search.value or "").strip().lower() if hasattr(self, "overview_search") else ""
@@ -3602,6 +3796,17 @@ class DQToolWebApp:
             self._overview_collapsed.discard(stable_key)
         else:
             self._overview_collapsed.add(stable_key)
+        self._refresh_overview_view()
+
+    def _on_toggle_rule_check(self, event: Any) -> None:
+        row = self._row_from_click_event(event)
+        if row is None or row.get("kind") != "rule":
+            return
+        stable_key = row["stable_key"]
+        if stable_key in self._checked_rule_keys:
+            self._checked_rule_keys.discard(stable_key)
+        else:
+            self._checked_rule_keys.add(stable_key)
         self._refresh_overview_view()
 
     def _highlight_overview_row(self) -> None:

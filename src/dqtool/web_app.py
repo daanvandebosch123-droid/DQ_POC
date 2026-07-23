@@ -74,6 +74,40 @@ CHART_MUTED = "#837d74"
 CHART_GRID = "#e2ded7"
 CHART_SERIES = "#6f6960"
 
+
+def dashboard_daily_metrics(runs: list[RuleRun]) -> tuple[list[str], list[float | None], list[int], list[int], list[int | None]]:
+    """Aggregate recent executions into the daily dashboard trend series."""
+    daily: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        try:
+            day = datetime.fromisoformat(run.started_at).date().isoformat()
+        except (TypeError, ValueError):
+            day = "Unknown"
+        bucket = daily.setdefault(day, {"passed": 0, "failed": 0, "errors": 0, "failed_rows": 0, "runtimes": []})
+        if run.status == "passed":
+            bucket["passed"] += 1
+        elif run.status == "failed":
+            bucket["failed"] += 1
+        else:
+            bucket["errors"] += 1
+        bucket["failed_rows"] += int(run.summary_json.get("failed_count") or 0)
+        if run.runtime_ms is not None:
+            bucket["runtimes"].append(run.runtime_ms)
+    days = sorted(daily)[-30:]
+    pass_rates: list[float | None] = []
+    volumes: list[int] = []
+    failed_rows: list[int] = []
+    average_runtimes: list[int | None] = []
+    for day in days:
+        bucket = daily[day]
+        completed = bucket["passed"] + bucket["failed"]
+        pass_rates.append(round(bucket["passed"] / completed * 100, 1) if completed else None)
+        volumes.append(bucket["passed"] + bucket["failed"] + bucket["errors"])
+        failed_rows.append(bucket["failed_rows"])
+        values = bucket["runtimes"]
+        average_runtimes.append(round(sum(values) / len(values)) if values else None)
+    return days, pass_rates, volumes, failed_rows, average_runtimes
+
 # Shared Quasar cell templates -------------------------------------------------
 
 # Tree Name cell used by the Rules and Results overview tables: CSS indentation by depth,
@@ -198,6 +232,9 @@ class DQToolWebApp:
         self.outcomes_chart: ui.echart
         self.top_failures_chart: ui.echart
         self.slowest_rules_chart: ui.echart
+        self.quality_trend_chart: ui.echart
+        self.failed_rows_trend_chart: ui.echart
+        self.runtime_trend_chart: ui.echart
         self.results_outcome_chart: ui.echart
         self.results_trend_chart: ui.echart
         self.anomaly_nulls_chart: ui.echart
@@ -570,6 +607,30 @@ class DQToolWebApp:
                                     self._stat_block("Failed / error", "0", "error_outline", "#dc2626", "#fff0f0")
                                     self._stat_block("Recent runs", "0", "play_circle", "#b45309", "#f9f0e3")
 
+                                with ui.column().classes("w-full gap-1"):
+                                    ui.label("TRENDS").classes("dq-eyebrow ml-1")
+                                    ui.label("Quality over time").classes("dq-panel-title text-2xl font-bold ml-1")
+                                    ui.label("Daily trends from the latest 1,000 executions.").classes("dq-panel-copy text-sm ml-1")
+                                with ui.row().classes("w-full items-stretch gap-5"):
+                                    with ui.card().classes("dq-soft-card w-full lg:w-[calc(50%-20px)] p-6"):
+                                        ui.label("QUALITY").classes("dq-eyebrow")
+                                        ui.label("Pass rate and run volume").classes("dq-panel-title text-xl font-bold")
+                                        self.quality_trend_chart = ui.echart(self._empty_chart_options("No trend data yet")).classes(
+                                            "w-full h-[280px]"
+                                        )
+                                    with ui.card().classes("dq-soft-card w-full lg:w-[calc(25%-10px)] p-6"):
+                                        ui.label("IMPACT").classes("dq-eyebrow")
+                                        ui.label("Failed rows per day").classes("dq-panel-title text-lg font-bold")
+                                        self.failed_rows_trend_chart = ui.echart(self._empty_chart_options("No trend data yet")).classes(
+                                            "w-full h-[280px]"
+                                        )
+                                    with ui.card().classes("dq-soft-card w-full lg:w-[calc(25%-10px)] p-6"):
+                                        ui.label("SPEED").classes("dq-eyebrow")
+                                        ui.label("Average runtime per day").classes("dq-panel-title text-lg font-bold")
+                                        self.runtime_trend_chart = ui.echart(self._empty_chart_options("No runtime data yet")).classes(
+                                            "w-full h-[280px]"
+                                        )
+
                                 with ui.row().classes("w-full items-stretch gap-5"):
                                     with ui.card().classes("dq-soft-card w-full lg:w-[calc(38%-10px)] p-6"):
                                         ui.label("OUTCOMES").classes("dq-eyebrow")
@@ -865,9 +926,7 @@ class DQToolWebApp:
                         self.result_select = ui.select(options={}, label="Selected run").props("outlined dense").classes(
                             "grow min-w-[230px] max-w-[380px]"
                         )
-                        self.result_select.on_value_change(
-                            lambda event: self._highlight_table_row(self.results_table, event.value)
-                        )
+                        self.result_select.on_value_change(self._on_result_select_change)
                         ui.button("Details", icon="subject", on_click=self.view_selected_result).props("outline no-caps")
                         ui.button("Failed rows", icon="table_view", on_click=self.preview_selected_failed_rows).props(
                             "color=primary unelevated no-caps"
@@ -3139,15 +3198,18 @@ class DQToolWebApp:
         rule_name = rules.get(run.rule_id, f"Rule #{run.rule_id}")
         source_name = run.summary_json.get("source_label", f"Source for rule #{run.rule_id}")
         if run.status == "error":
+            self._clear_failed_rows_preview()
             self.failed_rows_label.text = f"{rule_name} on {source_name} | ERROR: {run.summary_json.get('error', 'Execution failed')}"
             self.failed_rows_label.update()
             return
         if not run.failed_rows_path:
+            self._clear_failed_rows_preview()
             self.failed_rows_label.text = f"{rule_name} on {source_name} | This run has no failed rows to preview."
             self.failed_rows_label.update()
             return
         path = Path(run.failed_rows_path)
         if not path.exists():
+            self._clear_failed_rows_preview()
             self.failed_rows_label.text = f"{rule_name} on {source_name} | Failed-rows file is missing: {path}"
             self.failed_rows_label.update()
             return
@@ -3173,6 +3235,11 @@ class DQToolWebApp:
         self.failed_rows_label.text = f"{rule_name} on {source_name} | Showing {len(rows):,} of {total_failed:,} failed rows for this run"
         self.failed_rows_label.update()
         self._set_last_action(f"Previewed failed rows for run {run.id}")
+
+    def _clear_failed_rows_preview(self) -> None:
+        self.failed_rows_table.columns = []
+        self.failed_rows_table.rows = []
+        self.failed_rows_table.update()
 
     async def preview_selected_connection_source(self) -> None:
         if not self.project:
@@ -3230,12 +3297,15 @@ class DQToolWebApp:
             self._set_chart_options(self.outcomes_chart, self._empty_chart_options("Open a project to see charts"))
             self._set_chart_options(self.top_failures_chart, self._empty_chart_options("Open a project to see charts"))
             self._set_chart_options(self.slowest_rules_chart, self._empty_chart_options("Open a project to see charts"))
+            self._set_dashboard_trend_empty("Open a project to see charts")
             return
         rules = self._visible_rules()
         runs = self.project.storage.list_rule_runs(limit=20)
         dashboard_runs = self.project.storage.list_rule_runs(limit=100)
+        trend_runs = self.project.storage.list_rule_runs(limit=1000)
         rule_names = {rule.id: rule.name for rule in self.project.storage.list_rules() if rule.id is not None}
         self._update_dashboard_charts(dashboard_runs, rule_names)
+        self._update_dashboard_trend_charts(trend_runs)
         unsuccessful = [run for run in dashboard_runs if run.status in {"failed", "error"}]
         passed = sum(run.status == "passed" for run in dashboard_runs)
         completed = sum(run.status in {"passed", "failed"} for run in dashboard_runs)
@@ -3376,6 +3446,53 @@ class DQToolWebApp:
                         "label": {"show": True, "position": "right", "color": "#37332e"},
                     }
                 ],
+            },
+        )
+
+    def _set_dashboard_trend_empty(self, message: str) -> None:
+        for chart in (self.quality_trend_chart, self.failed_rows_trend_chart, self.runtime_trend_chart):
+            self._set_chart_options(chart, self._empty_chart_options(message))
+
+    def _update_dashboard_trend_charts(self, runs: list[RuleRun]) -> None:
+        if not runs:
+            self._set_dashboard_trend_empty("No trend data yet")
+            return
+        days, pass_rates, volumes, failed_rows, average_runtimes = dashboard_daily_metrics(runs)
+        self._set_chart_options(
+            self.quality_trend_chart,
+            {
+                "tooltip": {"trigger": "axis"},
+                "legend": {"bottom": 0, "textStyle": {"color": CHART_MUTED}},
+                "grid": {"left": 8, "right": 44, "top": 18, "bottom": 44, "containLabel": True},
+                "xAxis": {"type": "category", "data": days, "axisLabel": {"color": CHART_MUTED, "rotate": 30, "fontSize": 10}},
+                "yAxis": [
+                    {"type": "value", "name": "%", "min": 0, "max": 100, "axisLabel": {"color": CHART_MUTED, "formatter": "{value}%"}},
+                    {"type": "value", "name": "runs", "minInterval": 1, "axisLabel": {"color": CHART_MUTED}},
+                ],
+                "series": [
+                    {"name": "Pass rate", "type": "line", "data": pass_rates, "smooth": True, "lineStyle": {"width": 2, "color": "#16a34a"}, "itemStyle": {"color": "#16a34a"}},
+                    {"name": "Runs", "type": "bar", "yAxisIndex": 1, "data": volumes, "barMaxWidth": 18, "itemStyle": {"color": "#8d8579", "borderRadius": [3, 3, 0, 0]}},
+                ],
+            },
+        )
+        self._set_chart_options(
+            self.failed_rows_trend_chart,
+            {
+                "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+                "grid": {"left": 8, "right": 20, "top": 18, "bottom": 38, "containLabel": True},
+                "xAxis": {"type": "category", "data": days, "axisLabel": {"color": CHART_MUTED, "rotate": 30, "fontSize": 10}},
+                "yAxis": {"type": "value", "minInterval": 1, "axisLabel": {"color": CHART_MUTED}, "splitLine": {"lineStyle": {"color": CHART_GRID}}},
+                "series": [{"name": "Failed rows", "type": "bar", "data": failed_rows, "barMaxWidth": 20, "itemStyle": {"color": "#dc2626", "borderRadius": [3, 3, 0, 0]}}],
+            },
+        )
+        self._set_chart_options(
+            self.runtime_trend_chart,
+            {
+                "tooltip": {"trigger": "axis", "valueFormatter": "(value) => value == null ? '-' : value + ' ms'"},
+                "grid": {"left": 8, "right": 48, "top": 18, "bottom": 38, "containLabel": True},
+                "xAxis": {"type": "category", "data": days, "axisLabel": {"color": CHART_MUTED, "rotate": 30, "fontSize": 10}},
+                "yAxis": {"type": "value", "name": "ms", "axisLabel": {"color": CHART_MUTED, "formatter": "{value} ms"}, "splitLine": {"lineStyle": {"color": CHART_GRID}}},
+                "series": [{"name": "Average runtime", "type": "line", "data": average_runtimes, "connectNulls": False, "smooth": True, "lineStyle": {"width": 2, "color": "#b45309"}, "itemStyle": {"color": "#b45309"}}],
             },
         )
 
@@ -4451,8 +4568,17 @@ class DQToolWebApp:
         self.selected_run_id = selected_id
         self.result_select.value = selected_id
         self.result_select.update()
+        self._show_selected_result_context()
+
+    def _on_result_select_change(self, event: Any) -> None:
+        self.selected_run_id = str(event.value) if event.value else None
+        self._show_selected_result_context()
+
+    def _show_selected_result_context(self) -> None:
+        selected_id = self.result_select.value
         self._highlight_table_row(self.results_table, selected_id)
         self.view_selected_result()
+        self.preview_selected_failed_rows()
 
     def _format_timestamp(self, value: str | None) -> str:
         if not value:

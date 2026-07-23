@@ -27,6 +27,8 @@ service-oriented and safe for existing SQLite project databases.
 - `src/dqtool/services/execution.py`: rule evaluation and `RuleRun`
   persistence.
 - `src/dqtool/services/scheduling.py`: cadence and next-run calculations.
+- `src/dqtool/services/profiling.py`: source statistics, drift detection and
+  editable rule suggestions; keep them advisory and test the inference rules.
 
 ## Data and migration rules
 
@@ -47,6 +49,8 @@ service-oriented and safe for existing SQLite project databases.
 - Keep custom SQL restricted to authorised users and prefer read-only source
   database accounts.
 - Do not expose the application publicly over HTTP.
+- For profile suggestions, do not assume an observed value or range is a
+  business rule: users must review and save the suggestion explicitly.
 
 ## UI conventions
 
@@ -64,7 +68,8 @@ service-oriented and safe for existing SQLite project databases.
 - Run Ruff, relevant tests and `git diff --check` before handoff.
 - Review `git status` before staging.
 - Do not commit `.venv`, local SQLite databases, secrets, NiceGUI storage,
-  uploads, exports, result CSVs or generated runtime test artifacts.
+  uploads, exports, result CSVs, generated runtime test artifacts, or tool
+  caches. These are covered by `.gitignore`; do not force-add them.
 - Preserve unrelated user changes in a dirty working tree.
 
 For detailed architecture and maintenance procedures, read:

@@ -50,7 +50,7 @@ process. That process hosts both the browser UI and the in-process scheduler.
 | Source services | `services/connectors.py` | Connection testing, previews, target discovery and source access |
 | Execution services | `services/execution.py` | Rule SQL generation, evaluation, result evidence and run history |
 | Scheduling services | `services/scheduling.py` | Cadence descriptions and next-run calculation |
-| Analysis services | `services/profiling.py`, `services/ollama.py` | Profiles, anomaly context and optional AI summaries |
+| Analysis services | `services/profiling.py`, `services/ai.py` | Profiles, drift findings, rule ideas and optional local-AI summaries |
 
 The UI calls services; services own persistence and source-access details. This
 separation lets tests exercise rule, connection and schedule behaviour without
@@ -115,6 +115,11 @@ The execution result status is `passed`, `failed` or `error`. New runs
 store `runtime_ms`. Scheduler-originated runs also store `schedule_id`,
 which is how schedule history and pass-rate statistics are calculated.
 
+The Dashboard reads the latest 100 runs for its current-state cards and
+hotspots, and up to 1,000 runs for daily quality trends. It does not persist
+aggregates: pass rate, run volume, failed-row volume and average runtime are
+calculated from `RuleRun` history when the dashboard refreshes.
+
 ## Supported connections
 
 | Source type | Access path |
@@ -152,6 +157,31 @@ The scheduler operates only while the DQTool process is running. A production
 deployment requiring guaranteed execution should run the application as a
 service or use a durable external job runner.
 
+## Profiling and suggested-rule flow
+
+Profiling is advisory: it creates a snapshot and recommendations but never
+changes rules on its own.
+
+    Selected source
+          |
+          v
+    ProfilingService calculates column statistics and content findings
+          |
+          +--> Save SourceProfile for drift comparison and trend charts
+          |
+          +--> Infer meaning (number, date/time, email, category)
+          |
+          v
+    Build editable rule suggestions, grouped/filterable by field in the UI
+          |
+          v
+    Open normal rule dialog with source and settings prefilled
+
+Suggestions use observed completeness, cardinality, value ranges, lengths and
+value shapes. Dutch identifier naming (for example `klantnummer`, `ordernummer`,
+`nummer`, `nr`, `code`, and `sleutel`) is considered when identifying likely
+key fields. The user reviews and saves every rule explicitly.
+
 ## Security boundaries and operational assumptions
 
 - Application passwords are salted PBKDF2-SHA256 hashes.
@@ -161,6 +191,8 @@ service or use a durable external job runner.
   users.
 - Source database accounts should normally be read-only.
 - SQLite project databases, uploads and results must be backed up together.
+- Browser-session storage, test runtime output and tool caches are local files
+  excluded by `.gitignore`; they are not project data.
 
 ## Extensibility
 

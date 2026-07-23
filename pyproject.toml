@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dqtool"
 version = "0.1.0"
-description = "Data quality tool for Oracle and CSV sources with a NiceGUI web UI."
+description = "Data quality tool for CSV, Oracle, ODBC sources, scheduling and profiling with a NiceGUI web UI."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

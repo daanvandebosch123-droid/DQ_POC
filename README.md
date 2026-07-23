@@ -1,21 +1,20 @@
 # DQTool
 
-DQTool is a Windows-first Python application for defining and running data quality checks against Oracle, SQL Server, DB2, Sybase (SAP ASE), and CSV datasets inside a shared team project. Besides pass/fail rules, it also profiles sources over time to flag drift (row count jumps, null spikes, vanished columns, shifted averages), optionally explained in plain language by a locally running AI model.
+DQTool is a Windows-first Python application for defining and running data quality checks against Oracle, SQL Server, DB2, Sybase ASE, Sybase IQ / SQL Anywhere, and CSV datasets inside a shared team project. Besides pass/fail rules, it profiles sources over time to flag drift and turn observed source characteristics into editable rule ideas.
 
 ## Feature overview
 
 - NiceGUI web UI: dashboard, connections, rules, schedules, results, anomaly detection, accounts, and source preview
 - Shared project metadata stored in a SQLite file inside a shared workspace folder
 - `Workspace Admin` / `Project Admin` / `Project User` roles, with per-item visibility and ownership
-- Connectors for Oracle, SQL Server, DB2, Sybase (SAP ASE), and CSV
+- Connectors for Oracle, SQL Server, DB2, Sybase ASE, Sybase IQ / SQL Anywhere, and CSV
 - CSV files can be uploaded straight from the browser (not just browsed from the server's disk)
 - Built-in rules plus custom SQL rules, including SQL that runs against a whole connection
 - Rule groups: nest rules and subgroups into a tree, and run an entire group in one click
 - Checkboxes in the Rules tab to run an arbitrary hand-picked set of rules in a single batch, independent of groups
 - Schedules: run a rule or rule group automatically on an hourly/daily/weekly cadence while the app is running
-- Anomaly detection: snapshot a source's profile over time and flag drift, with an optional local-AI explanation
+- Profiling and anomaly detection: snapshot a source, flag drift, infer column meaning, and suggest editable rules
 - Failed-row previews in the app and export to CSV
-- JSON import/export for rules, datasets, and connections
 - Central-server mode so a team can share one running instance over the network
 
 ## Install
@@ -35,9 +34,10 @@ Installing the `pyodbc` package is not enough on its own — each database also 
 | Oracle | 1521 | n/a (`oracledb`, no ODBC driver needed) | included via `oracledb` |
 | SQL Server | 1433 | `ODBC Driver 17 for SQL Server` | Microsoft ODBC Driver for SQL Server |
 | DB2 | 50000 | `IBM DB2 ODBC DRIVER` | IBM Data Server Driver / Db2 client |
-| Sybase (SAP ASE) | 5000 | `Adaptive Server Enterprise` | SAP ASE ODBC driver |
+| Sybase ASE | 5000 | `Adaptive Server Enterprise` | SAP ASE ODBC driver |
+| Sybase IQ / SQL Anywhere | 12700 (typical) | `Sybase IQ` | SAP SQL Anywhere / Sybase IQ ODBC driver |
 
-The driver name shown above is just the default pre-filled in the connection dialog; it can be overridden per connection if your installed driver is registered under a different name (check ODBC Data Source Administrator on Windows to see what's actually registered).
+The driver name shown above is only a starting value in the connection dialog; it can be overridden per connection if your installed driver is registered under a different name. For Sybase IQ / SQL Anywhere, choose that server type and provide the IQ server/engine name (`ENG`); leave Database empty when the external ODBC tool connects without a database name (`DBN`). Check ODBC Data Source Administrator on Windows to see the driver names actually registered.
 
 Anomaly explanations are optional and need a locally running [Ollama](https://ollama.com) server (default `http://localhost:11434`, default model `qwen2.5:7b`, both configurable in settings) — the "Explain with AI" button just won't do anything useful without it, everything else in the app works fine either way. No data leaves the machine for this: the request goes to `localhost`, not a cloud API.
 
@@ -130,7 +130,7 @@ Rules are built from a fixed set of check types, each with its own setup form:
 
 The **Rules tab** overview shows every rule and group as a single indented tree. Each rule row has a checkbox, independent of rule groups — check any combination of rules across the tree and click **Run selected** to execute exactly that set in one batch, with a confirmation dialog and a combined pass/fail/error summary. This is separate from the single-item **Run** button (which runs whichever rule or group is currently selected) and from running a whole group.
 
-Every run — manual, batch, group, or scheduled — lands in the **Results tab**: per-rule run history, pass/fail/error counts, a trend chart, and failed-row previews you can export to CSV.
+Every run — manual, batch, group, or scheduled — lands in the **Results tab** with status, checked rows, failed rows, start time, runtime, per-rule history, trend charts, and failed-row previews you can export to CSV. Selecting a group combines the executions of all of its nested rules in the selected-executions section.
 
 ## Schedules
 
@@ -142,12 +142,19 @@ The **Schedules tab** runs a single rule or an entire rule group automatically, 
 - **Run now** on a selected schedule triggers its target immediately, tagged with your own username instead of `"scheduler"`, and does not change the schedule's own next-run time — it's for testing a schedule without disturbing its cadence.
 - Deleting a schedule does not delete the underlying rule or group; it only stops the automatic run.
 - If a scheduled rule or group is deleted after the schedule was created, the next scheduled run records status `error` rather than silently doing nothing, so it's visible in the Schedules tab.
+- The Schedules tab shows historical executions plus pass rate, checked/failed rows, runtime, and status for runs associated with that schedule.
 
 ## Source preview and anomaly detection
 
 The **Preview tab** shows the first rows of any connection's file or table — a quick sanity check before building rules against it.
 
-The **Anomalies tab** goes further: pick a connection and a file/table, run a check, and it profiles the source (row count, per-column null rate, distinct count, inferred meaning, mean, etc.) and compares it against the previous snapshot for that same source to flag drift — row count jumps, null spikes, vanished columns, shifted averages. Each run adds a new snapshot, so trend charts (null rate by column, row count over time) build up as checks accumulate. It also proposes editable starter rules for complete fields, unique keys, emails, observed numeric ranges, and small category lists; these are never saved automatically. **Explain with AI** sends the profile and drift findings (not the raw data) to a locally running Ollama model and returns a plain-language summary — see the Ollama note under **Install**.
+The **Anomalies tab** goes further: pick a connection and a file/table, run a check, and it profiles the source (row count, per-column null rate, distinct count, inferred meaning, mean, text length, etc.) and compares it against the previous snapshot for drift — row count jumps, null spikes, vanished columns, shifted averages, malformed values, and outliers. Each run adds a snapshot, so null-rate and row-count trend charts build up over time.
+
+The profiler proposes editable starter rules for complete fields, unique or duplicated identifier-like fields, date validity, email format, observed numeric ranges, text lengths, and small category lists. Suggestions can be filtered by field, then opened in the normal rule editor; they are never saved automatically. Identifier detection recognises common Dutch names such as `klantnummer`, `artikelnummer`, `ordernummer`, and suffixes including `nummer`, `nr`, `code`, and `sleutel`. **Explain with AI** sends profile and drift findings—not the raw data—to a locally running Ollama model; see the Ollama note under **Install**.
+
+## Dashboard trends
+
+The Dashboard combines a latest-100-execution overview with daily trends from the latest 1,000 executions. The trend cards show pass rate with run volume, failed-row volume, and average runtime. They are operational indicators: a day with only execution errors has no pass-rate value, and a day without stored runtimes has a gap in the runtime chart rather than a misleading zero.
 
 ## Central server for multiple users
 
@@ -182,6 +189,7 @@ Database connection passwords (Oracle, SQL Server, DB2, Sybase — not just Orac
 - The app remembers the last opened workspace folder per Windows user; sign-in is asked on each start.
 - A project folder is initialized automatically the first time it is opened.
 - Large failed result sets are previewed in the app and can be exported to CSV.
+- `.nicegui/`, test runtime output, test/lint caches, local SQLite files, uploads, exports, and `.venv/` are local/generated files and are intentionally excluded from Git.
 
 ## Architecture
 

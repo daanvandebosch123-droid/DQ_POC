@@ -32,7 +32,7 @@ The user interface and background scheduler are hosted by the same Python proces
         workspace.py         Users, workspaces and membership
         project.py           Project metadata and directories
         profiling.py         Source profiling and anomaly support
-        ollama.py            Optional local Ollama integration
+        ai.py                Optional local Ollama integration
     tests/                   Automated tests
     docs/                    Documentation
 
@@ -180,6 +180,24 @@ Execution history resides in `rule_runs` in the project database. The Results pa
 
 Selecting a rule group resolves all rules in that group and its nested groups, then combines their executions in the “Executions of the selected rule” section. This makes a group an operational view across related checks.
 
+## Dashboard metrics and trends
+
+The Dashboard uses `list_rule_runs(limit=100)` for current-state outcomes,
+hotspots and slowest-rule averages. Its trend section reads up to 1,000 runs,
+groups them by the UTC date in `started_at`, and displays the latest 30 days
+represented in that sample:
+
+| Trend | Calculation | Important edge case |
+| --- | --- | --- |
+| Pass rate | `passed / (passed + failed)` | An error-only day has no pass rate; errors remain included in run volume. |
+| Run volume | Passed + failed + error executions | Includes manual and scheduled runs. |
+| Failed-row volume | Sum of `summary_json.failed_count` | Zero is shown when completed runs have no failed rows. |
+| Average runtime | Mean of non-null `runtime_ms` values | Older runs without runtime appear as a chart gap, not as zero. |
+
+Do not add a persisted dashboard-summary table unless the on-demand history
+queries become a measured performance issue; it would require invalidation for
+run deletion and migration/backfill handling.
+
 ## Scheduler
 
 Schedules define a cadence plus a selected rule set or rule group. `services/scheduling.py` uses `ZoneInfo("Europe/Brussels")` explicitly, so daily and weekly schedules follow Brussels time rather than UTC or the PC's configured timezone. Daylight-saving changes are handled by the timezone database.
@@ -206,7 +224,9 @@ The Schedules page builds execution statistics from `RuleRun` records associated
 
 `ProfilingService` collects source metadata and statistics, persists them as `SourceProfile` records, and supports drift/anomaly comparisons.
 
-For CSV sources it also infers a practical column meaning (for example number, date/time, email or small category), captures a complete value list only for low-cardinality categories, and builds **editable** starter-rule suggestions. Identifier inference recognises common Dutch business suffixes such as `nummer`, `nr`, `code` and `sleutel`, in addition to English-style names. The web layer adds the selected source reference to a suggestion and opens the normal rule dialog; it never saves a suggested rule automatically. This keeps profiling advisory and prevents observed values from silently becoming business policy.
+For CSV sources it also infers a practical column meaning (for example number, date/time, email or small category), captures a complete value list only for low-cardinality categories, and builds **editable** starter-rule suggestions. Suggestions cover not-null, unique, duplicate, date-validity, regex/email, numeric-range, text-length, and allowed-value checks when the observed data supports them. Identifier inference recognises common Dutch business names such as `klantnummer`, `artikelnummer`, and `ordernummer`, plus suffixes including `nummer`, `nr`, `code` and `sleutel`.
+
+The profile UI groups/filter suggestions by source field. When a user selects one and chooses **Create selected rule**, the web layer combines the profiled source reference with the suggested settings and opens the normal rule dialog. It never saves a rule automatically. This keeps profiling advisory and prevents observed values from silently becoming business policy. For text-backed date columns, date inference is based on values DuckDB can safely cast as dates; physical database date/time types are also recognised.
 
 The optional Ollama service uses a locally running Ollama endpoint (normally `http://localhost:11434`) and the configured model. It sends profile/anomaly context rather than full source datasets. Rule execution does not depend on Ollama.
 
@@ -221,6 +241,7 @@ Notable UI design choices:
 - normal tables hide internal IDs; IDs are available where editing requires them;
 - groups use expandable tree rows;
 - rule descriptions use the standard form input styling.
+- profile suggestions start with no field filter selected, so all ideas are visible until the user narrows them.
 
 NiceGUI state is browser-session based. Rule execution is currently in the application process, meaning large source queries may affect UI responsiveness. A larger deployment should move execution to workers and let the UI poll for progress.
 
@@ -269,7 +290,7 @@ features need changes in more than one row.
 | Saved data/schema change | `services/storage.py` | Entity mapping, backwards-compatibility tests |
 | New cadence or time calculation | `services/scheduling.py` | Schedule UI and scheduling tests |
 | Login, users, workspace/project access | `services/workspace.py` | UI permission checks and workspace tests |
-| New profile, anomaly or AI summary | `services/profiling.py` / `ollama.py` | UI presentation and profile tests |
+| New profile, anomaly or AI summary | `services/profiling.py` / `ai.py` | UI presentation and profile tests |
 
 ### Non-negotiable change rules
 
@@ -325,8 +346,8 @@ For example, adding a new property to `Rule`:
 3. Update the insert/update statement in `save_rule()`.
 4. Update `_row_to_rule()` so both newly written and migrated rows map back
    to the entity correctly.
-5. Add the field to export/import metadata when it is part of the project
-   contract.
+5. Update every persisted read/write path that owns the field; this project does
+   not provide a general metadata import/export feature.
 6. Add it to the create/edit form and to the appropriate read-only view.
 7. Test a fresh database and a database representing the previous schema.
 
@@ -560,6 +581,8 @@ Before deployment:
 
 Generated test fixtures and runtime results can appear as modified or deleted
 files after tests. Do not include them in a feature commit unless the test
-fixture itself was deliberately changed. Likewise, do not commit NiceGUI local
-storage files, local SQLite databases, uploads, exports, result CSVs, virtual
-environments, or secret stores.
+fixture itself was deliberately changed. `.gitignore` excludes NiceGUI local
+storage, the generated `tests/.runtime-results/` folder and
+`tests/.runtime-latin1.csv`, pytest/Ruff caches, agent scratch folders, local
+SQLite databases, uploads, exports, result CSVs, virtual environments, and
+secret stores.

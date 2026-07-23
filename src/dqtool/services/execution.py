@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import math
 import re
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,6 +112,7 @@ class ExecutionService:
         runs: list[RuleRun] = []
         for rule in rules:
             started_at = utc_now()
+            started_clock = time.perf_counter()
             dataset_id = rule.dataset_id or 0
             failed_rows_path = None
             source_label = self._source_label(rule)
@@ -146,6 +148,7 @@ class ExecutionService:
                     finished_at=utc_now(),
                     summary_json=summary,
                     failed_rows_path=failed_rows_path,
+                    runtime_ms=round((time.perf_counter() - started_clock) * 1000),
                 )
             )
         return runs

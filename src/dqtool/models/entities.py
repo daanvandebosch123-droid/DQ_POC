@@ -146,6 +146,8 @@ class RuleRun:
     finished_at: str | None = None
     summary_json: dict[str, Any] = field(default_factory=dict)
     failed_rows_path: str | None = None
+    schedule_id: int | None = None
+    runtime_ms: int | None = None
 
 
 @dataclass(slots=True)

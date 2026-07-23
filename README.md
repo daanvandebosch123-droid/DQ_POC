@@ -140,7 +140,7 @@ Every run — manual, batch, group, or scheduled — lands in the **Results tab*
 
 The **Schedules tab** runs a single rule or an entire rule group automatically, without anyone opening the app:
 
-- **Cadence** is one of three presets: hourly (every N hours), daily (once a day at a chosen HH:MM), or weekly (once a week on a chosen day and HH:MM). All times are UTC.
+- **Cadence** is one of three presets: hourly (every N hours), daily (once a day at a chosen HH:MM), or weekly (once a week on a chosen day and HH:MM). Daily and weekly times use the Europe/Brussels time zone.
 - The scheduler is a background loop inside the DQTool server process, checked every minute against every project in the workspace — **it only runs while `python -m dqtool.app` (or the packaged `dqtool` entry point) is actually running.** It is not a Windows service and does not survive the app being closed; if you need it to run unattended, keep the process running (e.g., as a scheduled console session on a server) rather than relying on someone's laptop being open.
 - Scheduled runs are recorded exactly like manual runs (visible in the Results tab), tagged with `executed_by = "scheduler"` so they're distinguishable from a person's manual run.
 - **Run now** on a selected schedule triggers its target immediately, tagged with your own username instead of `"scheduler"`, and does not change the schedule's own next-run time — it's for testing a schedule without disturbing its cadence.

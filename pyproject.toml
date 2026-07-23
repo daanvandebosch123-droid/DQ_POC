@@ -12,6 +12,7 @@ dependencies = [
   "nicegui>=2.0.0",
   "duckdb>=1.0.0",
   "oracledb>=2.2.1",
+  "tzdata>=2025.1",
 ]
 
 [project.optional-dependencies]

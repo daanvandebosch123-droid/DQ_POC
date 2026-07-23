@@ -62,6 +62,8 @@ class ExecutionServiceTests(unittest.TestCase):
         self.assertEqual("failed", run.status)
         self.assertEqual(2, run.summary_json["failed_count"])
         self.assertTrue(Path(run.failed_rows_path).exists())
+        self.assertIsNotNone(run.runtime_ms)
+        self.assertGreaterEqual(run.runtime_ms or 0, 0)
 
     def test_failed_rows_append_to_one_file_per_rule_with_execution_datetime(self) -> None:
         import csv

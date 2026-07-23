@@ -5,8 +5,8 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dqtool.models.entities import Rule, RuleType, Schedule, ScheduleCadence, ScheduleTargetKind
-from dqtool.services.scheduling import compute_next_run, describe_cadence
+from dqtool.models.entities import Rule, RuleRun, RuleType, Schedule, ScheduleCadence, ScheduleTargetKind
+from dqtool.services.scheduling import BRUSSELS_TIMEZONE, compute_next_run, describe_cadence
 from dqtool.services.storage import Storage
 
 # A fixed Thursday reference instant so cadence math is deterministic regardless of when tests run.
@@ -38,33 +38,33 @@ class ComputeNextRunTests(unittest.TestCase):
     def test_daily_later_today_stays_today(self) -> None:
         schedule = _schedule(cadence=ScheduleCadence.DAILY, time_of_day="18:00")
         result = compute_next_run(schedule, after=NOW)
-        self.assertEqual(datetime(2026, 7, 16, 18, 0, tzinfo=UTC), result)
+        self.assertEqual(datetime(2026, 7, 16, 18, 0, tzinfo=BRUSSELS_TIMEZONE), result)
 
     def test_daily_already_passed_rolls_to_tomorrow(self) -> None:
         schedule = _schedule(cadence=ScheduleCadence.DAILY, time_of_day="09:00")
         result = compute_next_run(schedule, after=NOW)
-        self.assertEqual(datetime(2026, 7, 17, 9, 0, tzinfo=UTC), result)
+        self.assertEqual(datetime(2026, 7, 17, 9, 0, tzinfo=BRUSSELS_TIMEZONE), result)
 
     def test_weekly_same_weekday_later_today(self) -> None:
         # NOW is a Thursday (weekday index 3).
         schedule = _schedule(cadence=ScheduleCadence.WEEKLY, time_of_day="18:00", weekday=3)
         result = compute_next_run(schedule, after=NOW)
-        self.assertEqual(datetime(2026, 7, 16, 18, 0, tzinfo=UTC), result)
+        self.assertEqual(datetime(2026, 7, 16, 18, 0, tzinfo=BRUSSELS_TIMEZONE), result)
 
     def test_weekly_same_weekday_already_passed_jumps_a_week(self) -> None:
         schedule = _schedule(cadence=ScheduleCadence.WEEKLY, time_of_day="09:00", weekday=3)
         result = compute_next_run(schedule, after=NOW)
-        self.assertEqual(datetime(2026, 7, 23, 9, 0, tzinfo=UTC), result)
+        self.assertEqual(datetime(2026, 7, 23, 9, 0, tzinfo=BRUSSELS_TIMEZONE), result)
 
     def test_weekly_future_weekday_this_week(self) -> None:
         schedule = _schedule(cadence=ScheduleCadence.WEEKLY, time_of_day="09:00", weekday=5)  # Saturday
         result = compute_next_run(schedule, after=NOW)
-        self.assertEqual(datetime(2026, 7, 18, 9, 0, tzinfo=UTC), result)
+        self.assertEqual(datetime(2026, 7, 18, 9, 0, tzinfo=BRUSSELS_TIMEZONE), result)
 
     def test_weekly_past_weekday_next_week(self) -> None:
         schedule = _schedule(cadence=ScheduleCadence.WEEKLY, time_of_day="09:00", weekday=0)  # Monday
         result = compute_next_run(schedule, after=NOW)
-        self.assertEqual(datetime(2026, 7, 20, 9, 0, tzinfo=UTC), result)
+        self.assertEqual(datetime(2026, 7, 20, 9, 0, tzinfo=BRUSSELS_TIMEZONE), result)
 
     def test_malformed_time_of_day_falls_back_to_midnight(self) -> None:
         schedule = _schedule(cadence=ScheduleCadence.DAILY, time_of_day="not-a-time")
@@ -84,12 +84,12 @@ class DescribeCadenceTests(unittest.TestCase):
 
     def test_daily(self) -> None:
         self.assertEqual(
-            "Daily at 09:00 UTC", describe_cadence(_schedule(cadence=ScheduleCadence.DAILY, time_of_day="09:00"))
+            "Daily at 09:00 Brussels time", describe_cadence(_schedule(cadence=ScheduleCadence.DAILY, time_of_day="09:00"))
         )
 
     def test_weekly(self) -> None:
         self.assertEqual(
-            "Weekly on Monday at 07:30 UTC",
+            "Weekly on Monday at 07:30 Brussels time",
             describe_cadence(_schedule(cadence=ScheduleCadence.WEEKLY, time_of_day="07:30", weekday=0)),
         )
 
@@ -134,6 +134,24 @@ class ScheduleStorageTests(unittest.TestCase):
         self.assertEqual("2026-01-01T00:00:00+00:00", schedule.last_run_at)
         self.assertEqual("2026-01-02T00:00:00+00:00", schedule.next_run_at)
         self.assertEqual("passed", schedule.last_status)
+
+    def test_rule_run_keeps_its_originating_schedule(self) -> None:
+        schedule_id = self.storage.save_schedule(_schedule(name="s", target_id=self.rule_id))
+        self.storage.save_rule_run(
+            RuleRun(
+                id=None,
+                rule_id=self.rule_id,
+                dataset_id=0,
+                status="passed",
+                executed_by="scheduler",
+                started_at="2026-01-01T00:00:00+00:00",
+                schedule_id=schedule_id,
+                runtime_ms=125,
+            )
+        )
+        run = self.storage.list_rule_runs()[0]
+        self.assertEqual(schedule_id, run.schedule_id)
+        self.assertEqual(125, run.runtime_ms)
 
     def test_delete_schedule(self) -> None:
         schedule_id = self.storage.save_schedule(_schedule(name="s", target_id=self.rule_id))

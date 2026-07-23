@@ -108,8 +108,11 @@ class Storage:
                     finished_at TEXT,
                     summary_json TEXT NOT NULL,
                     failed_rows_path TEXT,
+                    schedule_id INTEGER,
+                    runtime_ms INTEGER,
                     FOREIGN KEY(rule_id) REFERENCES rules(id),
-                    FOREIGN KEY(dataset_id) REFERENCES datasets(id)
+                    FOREIGN KEY(dataset_id) REFERENCES datasets(id),
+                    FOREIGN KEY(schedule_id) REFERENCES schedules(id)
                 );
 
                 CREATE TABLE IF NOT EXISTS rule_groups (
@@ -156,6 +159,11 @@ class Storage:
             rule_columns = {row["name"] for row in conn.execute("PRAGMA table_info(rules)").fetchall()}
             if "description" not in rule_columns:
                 conn.execute("ALTER TABLE rules ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+            run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(rule_runs)").fetchall()}
+            if "schedule_id" not in run_columns:
+                conn.execute("ALTER TABLE rule_runs ADD COLUMN schedule_id INTEGER")
+            if "runtime_ms" not in run_columns:
+                conn.execute("ALTER TABLE rule_runs ADD COLUMN runtime_ms INTEGER")
             # Projects created before nested groups still lack this column.
             group_columns = {row["name"] for row in conn.execute("PRAGMA table_info(rule_groups)").fetchall()}
             if "child_group_ids_json" not in group_columns:
@@ -431,6 +439,8 @@ class Storage:
                 finished_at=row["finished_at"],
                 summary_json=json.loads(row["summary_json"]),
                 failed_rows_path=row["failed_rows_path"],
+                schedule_id=row["schedule_id"],
+                runtime_ms=row["runtime_ms"],
             )
             for row in rows
         ]
@@ -439,8 +449,10 @@ class Storage:
         with self._session() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO rule_runs(rule_id, dataset_id, status, executed_by, started_at, finished_at, summary_json, failed_rows_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO rule_runs(
+                    rule_id, dataset_id, status, executed_by, started_at, finished_at, summary_json, failed_rows_path, schedule_id,
+                    runtime_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.rule_id,
@@ -451,6 +463,8 @@ class Storage:
                     run.finished_at,
                     json.dumps(run.summary_json),
                     run.failed_rows_path,
+                    run.schedule_id,
+                    run.runtime_ms,
                 ),
             )
             return int(cursor.lastrowid)

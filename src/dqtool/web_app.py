@@ -12,9 +12,8 @@ from typing import Any
 
 from fastapi.responses import RedirectResponse
 from nicegui import app as nicegui_app
-from nicegui import events
+from nicegui import events, ui
 from nicegui import run as nicegui_run
-from nicegui import ui
 
 from dqtool.models.entities import (
     Connection,
@@ -53,7 +52,7 @@ from dqtool.services.rules import (
     resolve_group_rules,
     validate_rule_config,
 )
-from dqtool.services.scheduling import WEEKDAY_NAMES, compute_next_run, describe_cadence
+from dqtool.services.scheduling import BRUSSELS_TIMEZONE, WEEKDAY_NAMES, compute_next_run, describe_cadence
 from dqtool.services.workspace import (
     DEFAULT_ADMIN_PASSWORD,
     DEFAULT_ADMIN_USERNAME,
@@ -82,7 +81,13 @@ CHART_SERIES = "#6f6960"
 # to collapse/expand the subtree without selecting the row.
 TREE_NAME_CELL_TEMPLATE = r"""
     <q-td key="name" :props="props">
-        <div class="row items-center no-wrap" :style="{ paddingLeft: (props.row.depth * 22) + 'px' }">
+        <div
+            class="row items-center no-wrap"
+            :style="{
+                paddingLeft: (props.row.depth * 28) + 'px',
+                borderLeft: props.row.depth > 0 ? '2px solid #e5e1d9' : 'none'
+            }"
+        >
             <q-icon
                 v-if="props.row.kind === 'group' && props.row.has_children"
                 :name="props.row.collapsed ? 'chevron_right' : 'expand_more'"
@@ -92,13 +97,6 @@ TREE_NAME_CELL_TEMPLATE = r"""
                 @click.stop="() => $parent.$emit('toggle_group', props.row)"
             />
             <div v-else style="width: 22px; display: inline-block;"></div>
-            <q-icon
-                v-if="props.row.depth > 0"
-                name="subdirectory_arrow_right"
-                size="16px"
-                class="q-mr-xs"
-                style="color: #837d74"
-            />
             <q-icon
                 v-if="props.row.kind === 'group'"
                 name="folder"
@@ -113,8 +111,20 @@ TREE_NAME_CELL_TEMPLATE = r"""
                 class="q-mr-xs"
                 style="color: #8d8579"
             />
-            <span :style="(props.row.kind === 'group' && props.row.depth === 0) ? 'font-weight:700' : ''">{{ props.row.name }}</span>
+            <span :style="props.row.kind === 'group' ? 'font-weight:700' : ''">{{ props.row.name }}</span>
         </div>
+    </q-td>
+"""
+
+TREE_DETAILS_CELL_TEMPLATE = r"""
+    <q-td key="details" :props="props">
+        <q-badge
+            v-if="props.row.kind === 'group'"
+            outline
+            color="grey-7"
+            :label="props.row.details"
+        />
+        <span v-else>{{ props.row.details }}</span>
     </q-td>
 """
 
@@ -209,11 +219,13 @@ class DQToolWebApp:
         self.preview_table: ui.table
         self.failed_rows_table: ui.table
         self.schedules_table: ui.table
+        self.schedule_execution_table: ui.table
 
         self.connection_select: ui.select
         self.item_select: ui.select
         self.run_checked_button: ui.button
         self.schedule_select: ui.select
+        self.schedule_execution_summary: ui.label
         self.overview_search: ui.input
         self.results_search: ui.input
         self.result_rule_select: ui.select
@@ -400,6 +412,8 @@ class DQToolWebApp:
               .dq-main tbody tr:hover { background: #f4f2ed; }
               .dq-main .dq-selectable-table tbody tr { cursor: pointer; transition: background-color .16s ease, box-shadow .16s ease; }
               .dq-main .dq-selectable-table tbody tr.selected { background: #e9e6df !important; box-shadow: inset 4px 0 0 var(--dq-teal); }
+              .dq-main .dq-tree-table td { padding-top: 10px !important; padding-bottom: 10px !important; }
+              .dq-main .dq-tree-table .q-badge { font-weight: 700; }
               .dq-main .q-btn { border-radius: 11px; font-weight: 700; letter-spacing: 0; }
               .dq-main .q-field--outlined .q-field__control { border-radius: 11px; }
               .dq-meta-card { background: linear-gradient(145deg, #faf7f1, #fff) !important; border-color: #e5ded2 !important; }
@@ -711,11 +725,11 @@ class DQToolWebApp:
                 ).classes("w-full max-w-md")
                 self.overview_search.on_value_change(lambda _event: self._refresh_overview_view())
             self.overview_table = ui.table(
-                columns=self._columns(["Select", "ID", "Name", "Kind", "Details", "Owner", "Visibility", "Used In"]),
+                columns=self._tree_table_columns(["Batch", "Name", "Kind", "Details", "Owner", "Visibility", "Used In"]),
                 rows=[],
                 row_key="key",
                 pagination=10,
-            ).props("flat bordered wrap-cells").classes("dq-table-wrap w-full mt-4")
+            ).props("flat bordered wrap-cells").classes("dq-table-wrap dq-tree-table w-full mt-4")
             self.overview_table.classes(add="dq-selectable-table")
             self.overview_table.on("rowClick", self._select_overview_row)
             self.overview_table.on("toggle_group", self._on_toggle_group)
@@ -724,19 +738,21 @@ class DQToolWebApp:
             # the single-item selection used by the Edit/Run/Delete buttons above. Groups have no
             # checkbox: running a group already runs every rule nested under it.
             self.overview_table.add_slot(
-                "body-cell-select",
+                "body-cell-batch",
                 r"""
-                <q-td key="select" :props="props" @click.stop>
+                <q-td key="batch" :props="props" @click.stop>
                     <q-checkbox
                         v-if="props.row.kind === 'rule'"
                         :model-value="props.row.checked"
                         dense
                         @update:model-value="() => $parent.$emit('toggle_rule_check', props.row)"
                     />
+                    <span v-else class="text-grey-5">–</span>
                 </q-td>
                 """,
             )
             self.overview_table.add_slot("body-cell-name", TREE_NAME_CELL_TEMPLATE)
+            self.overview_table.add_slot("body-cell-details", TREE_DETAILS_CELL_TEMPLATE)
             # Colors visibility so private/shared/shared_specific reads at a glance instead of as plain text.
             self.overview_table.add_slot(
                 "body-cell-visibility",
@@ -758,7 +774,7 @@ class DQToolWebApp:
                     ui.label("AUTOMATION").classes("dq-eyebrow")
                     ui.label("Schedules").classes("dq-panel-title text-2xl font-bold")
                     ui.label(
-                        "Run a rule or rule group automatically. Times are UTC; the scheduler checks every "
+                        "Run a rule or rule group automatically. Times use Brussels time; the scheduler checks every "
                         "minute, and only fires while the DQTool app process itself is running."
                     ).classes("dq-panel-copy text-sm")
                 with ui.row().classes("items-end gap-2 flex-wrap grow justify-end"):
@@ -802,6 +818,20 @@ class DQToolWebApp:
                 </q-td>
                 """,
             )
+            ui.separator().classes("my-6")
+            with ui.column().classes("w-full gap-1"):
+                ui.label("SCHEDULE EXECUTION STATISTICS").classes("dq-eyebrow")
+                ui.label("Automatic execution history").classes("dq-panel-title text-xl font-bold")
+                self.schedule_execution_summary = ui.label("Select a schedule to view its automatic execution history.").classes(
+                    "dq-panel-copy text-sm"
+                )
+            self.schedule_execution_table = ui.table(
+                columns=self._columns(["Rule", "Status", "Started", "Runtime", "Checked Rows", "Failed Rows"]),
+                rows=[],
+                row_key="key",
+                pagination=5,
+            ).props("flat bordered wrap-cells").classes("dq-table-wrap w-full mt-3")
+            self.schedule_execution_table.add_slot("body-cell-status", STATUS_BADGE_CELL_TEMPLATE)
 
     def _build_results_tab(self) -> None:
         with ui.column().classes("w-full gap-4"):
@@ -825,24 +855,25 @@ class DQToolWebApp:
                     ).classes("w-full max-w-md")
                     self.results_search.on_value_change(lambda _event: self._refresh_results_view())
                 self.rule_summary_table = ui.table(
-                    columns=self._columns(["ID", "Name", "Kind", "Details", "Runs", "Last Status", "Last Run", "Last Failed"]),
+                    columns=self._tree_table_columns(["Name", "Kind", "Details", "Runs", "Last Status", "Last Run", "Last Failed"]),
                     rows=[],
                     row_key="key",
                     pagination=10,
-                ).props("flat bordered wrap-cells").classes("dq-table-wrap w-full mt-4")
+                ).props("flat bordered wrap-cells").classes("dq-table-wrap dq-tree-table w-full mt-4")
                 self.rule_summary_table.classes(add="dq-selectable-table")
                 self.rule_summary_table.on("rowClick", self._select_result_rule_row)
                 self.rule_summary_table.on("toggle_group", self._on_toggle_results_group)
                 # Same tree treatment as the Rules tab: indentation + per-kind icon + collapse chevron.
                 self.rule_summary_table.add_slot("body-cell-name", TREE_NAME_CELL_TEMPLATE)
+                self.rule_summary_table.add_slot("body-cell-details", TREE_DETAILS_CELL_TEMPLATE)
                 # Colors the aggregated/last status so passed/failed/error reads at a glance.
                 self.rule_summary_table.add_slot("body-cell-last_status", STATUS_BADGE_CELL_TEMPLATE)
             with ui.card().classes("dq-soft-card w-full p-6"):
                 with ui.row().classes("w-full items-start justify-between gap-4 flex-wrap"):
                     with ui.column().classes("gap-1"):
                         ui.label("DETAIL").classes("dq-eyebrow")
-                        ui.label("Executions of the selected rule").classes("dq-panel-title text-xl font-bold")
-                        ui.label("Every run of the rule, newest first. Pick a run for its summary and failed rows.").classes(
+                        ui.label("Executions of the selected rule or group").classes("dq-panel-title text-xl font-bold")
+                        ui.label("Every run, newest first. Select a group to see its rules' combined execution history.").classes(
                             "dq-panel-copy text-sm"
                         )
                     with ui.row().classes("items-end gap-2 flex-wrap grow justify-end"):
@@ -860,7 +891,7 @@ class DQToolWebApp:
                             "outline no-caps color=negative"
                         )
                 self.results_table = self._build_table(
-                    ["Run", "Status", "Checked", "Failed", "Started", "Failed Rows File"]
+                    ["Run", "Rule", "Status", "Checked", "Failed", "Started", "Runtime", "Failed Rows File"]
                 )
                 self.results_table.classes(add="dq-selectable-table")
                 self.results_table.on("rowClick", self._select_result_row)
@@ -1553,6 +1584,8 @@ class DQToolWebApp:
         default_connection = next(iter(connections)) if len(connections) == 1 else None
         with ui.dialog() as dialog, ui.card().classes("dq-rule-dialog w-[980px] max-w-full"):
             ui.label("Edit Rule" if rule else "Rule").classes("text-xl font-semibold")
+            if rule and rule.id is not None:
+                ui.label(f"Rule ID: {rule.id}").classes("dq-panel-copy text-xs")
             name = ui.input("Name", value=rule.name if rule else "").classes("w-full")
             description = ui.textarea(
                 "Description (optional)", value=rule.description if rule else ""
@@ -2472,7 +2505,7 @@ class DQToolWebApp:
                 "Every N hours", value=(existing.interval_hours if existing else 1), min=1, format="%.0f"
             ).classes("w-full")
             time_of_day = ui.input(
-                "Time (HH:MM, UTC)", value=(existing.time_of_day if existing else "09:00"), placeholder="09:00"
+                "Time (HH:MM, Brussels time)", value=(existing.time_of_day if existing else "09:00"), placeholder="09:00"
             ).classes("w-full")
             weekday = ui.select(
                 dict(enumerate(WEEKDAY_NAMES)),
@@ -2506,7 +2539,7 @@ class DQToolWebApp:
                             if not (0 <= hour <= 23 and 0 <= minute <= 59):
                                 raise ValueError
                         except ValueError:
-                            raise ValueError("Enter a valid time as HH:MM (24-hour, UTC).") from None
+                            raise ValueError("Enter a valid time as HH:MM (24-hour, Brussels time).") from None
                     schedule = Schedule(
                         id=existing.id if existing else None,
                         name=(name.value or "").strip(),
@@ -2523,7 +2556,7 @@ class DQToolWebApp:
                     )
                     if not schedule.name:
                         raise ValueError("Schedule name is required.")
-                    schedule.next_run_at = compute_next_run(schedule, after=datetime.now(UTC)).isoformat()
+                    schedule.next_run_at = compute_next_run(schedule, after=datetime.now(UTC)).astimezone(UTC).isoformat()
                     self.project.storage.save_schedule(schedule)
                     dialog.close()
                     self.refresh_all()
@@ -2563,7 +2596,7 @@ class DQToolWebApp:
             return
         schedule.enabled = not schedule.enabled
         if schedule.enabled:
-            schedule.next_run_at = compute_next_run(schedule, after=datetime.now(UTC)).isoformat()
+            schedule.next_run_at = compute_next_run(schedule, after=datetime.now(UTC)).astimezone(UTC).isoformat()
         self.project.storage.save_schedule(schedule)
         self.refresh_all()
         state = "enabled" if schedule.enabled else "disabled"
@@ -2620,6 +2653,7 @@ class DQToolWebApp:
 
     def _on_schedule_select_change(self, event: Any) -> None:
         self._highlight_table_row(self.schedules_table, event.value)
+        self._populate_schedule_execution_stats()
 
     def _select_schedule_row(self, event: Any) -> None:
         row = self._row_from_click_event(event)
@@ -2629,12 +2663,14 @@ class DQToolWebApp:
         self.schedule_select.value = selected_id
         self.schedule_select.update()
         self._highlight_table_row(self.schedules_table, selected_id)
+        self._populate_schedule_execution_stats()
 
     def _populate_schedules(self) -> None:
         if not self.project:
             self.schedules_table.rows = []
             self.schedules_table.update()
             self._set_select_options(self.schedule_select, {}, None)
+            self._populate_schedule_execution_stats()
             return
         schedules = self.project.storage.list_schedules()
         rules_by_id = {item.id: item for item in self._visible_rules() if item.id is not None}
@@ -2656,8 +2692,8 @@ class DQToolWebApp:
                     "target": target_label,
                     "cadence": describe_cadence(schedule),
                     "enabled": "Yes" if schedule.enabled else "No",
-                    "next_run": schedule.next_run_at or "-",
-                    "last_run": schedule.last_run_at or "-",
+                    "next_run": _format_local_schedule_time(schedule.next_run_at),
+                    "last_run": _format_local_schedule_time(schedule.last_run_at),
                     "last_status": (schedule.last_status or "-").upper(),
                 }
             )
@@ -2665,6 +2701,55 @@ class DQToolWebApp:
         self.schedules_table.rows = rows
         self.schedules_table.update()
         self._set_select_options(self.schedule_select, options, self.schedule_select.value)
+        self._populate_schedule_execution_stats()
+
+    def _populate_schedule_execution_stats(self) -> None:
+        """Show automatic-run outcomes for the schedule currently selected in the tab."""
+        if not self.project or not self.schedule_select.value:
+            self.schedule_execution_summary.text = "Select a schedule to view its automatic execution history."
+            self.schedule_execution_summary.update()
+            self.schedule_execution_table.rows = []
+            self.schedule_execution_table.update()
+            return
+
+        schedule = self._selected_schedule()
+        if schedule is None:
+            self.schedule_execution_summary.text = "The selected schedule no longer exists."
+            self.schedule_execution_summary.update()
+            self.schedule_execution_table.rows = []
+            self.schedule_execution_table.update()
+            return
+        rules_by_id = {item.id: item for item in self._visible_rules() if item.id is not None}
+        runs = [
+            run
+            for run in self.project.storage.list_rule_runs(limit=1000)
+            if run.executed_by == "scheduler" and run.schedule_id == schedule.id
+        ]
+        runs.sort(key=lambda run: run.started_at, reverse=True)
+        passed = sum(run.status == "passed" for run in runs)
+        failed = sum(run.status == "failed" for run in runs)
+        errored = sum(run.status == "error" for run in runs)
+        pass_rate = (passed / len(runs) * 100) if runs else 0.0
+        latest = _format_local_schedule_time(runs[0].started_at) if runs else "never"
+        self.schedule_execution_summary.text = (
+            f"{len(runs)} automatic rule execution(s) · {pass_rate:.1f}% pass rate · "
+            f"{passed} passed · {failed} failed · {errored} errored · Last run: {latest}"
+        )
+        self.schedule_execution_summary.update()
+        rule_names = {rule_id: rule.name for rule_id, rule in rules_by_id.items()}
+        self.schedule_execution_table.rows = [
+            {
+                "key": str(run.id),
+                "rule": rule_names.get(run.rule_id, f"Rule #{run.rule_id}"),
+                "status": run.status.upper(),
+                "started": _format_local_schedule_time(run.started_at),
+                "runtime": self._format_runtime(run.runtime_ms),
+                "checked_rows": run.summary_json.get("checked_count", "-"),
+                "failed_rows": run.summary_json.get("failed_count", "-"),
+            }
+            for run in runs[:50]
+        ]
+        self.schedule_execution_table.update()
 
     def edit_selected_group(self) -> None:
         if not self.project:
@@ -2942,6 +3027,7 @@ class DQToolWebApp:
             f"**Failed rows:** {summary.get('failed_count', 'n/a')}",
             f"**Started:** {self._format_timestamp(run.started_at)}",
             f"**Finished:** {self._format_timestamp(run.finished_at)}",
+            f"**Runtime:** {self._format_runtime(run.runtime_ms)}",
             f"**Executed by:** {run.executed_by}",
         ]
         if summary.get("error"):
@@ -3376,11 +3462,9 @@ class DQToolWebApp:
         def add_group_row(group: RuleGroup, depth: int, parent_key: str | None) -> str:
             nonlocal counter
             total_rules, _missing_rules, _missing_groups = resolve_group_rules(group, groups_by_id, rules_by_id)
-            direct_count = len(group.rule_ids)
             total_count = len(total_rules)
-            rules_summary = f"{total_count} total" if total_count == direct_count else f"{direct_count} direct / {total_count} total"
             subgroup_count = len(group.child_group_ids)
-            details = f"{rules_summary} rule(s)" + (f", {subgroup_count} subgroup(s)" if subgroup_count else "")
+            details = f"{total_count} rule(s)" + (f" · {subgroup_count} subgroup(s)" if subgroup_count else "")
             used_in = group_parent_names.get(group.id, [])
             counter += 1
             stable_key = f"group:{group.id}"
@@ -3525,7 +3609,7 @@ class DQToolWebApp:
             resolved_rules, _missing_rules, _missing_groups = resolve_group_rules(group, groups_by_id, rules_by_id)
             stats = aggregate_stats([rule.id for rule in resolved_rules if rule.id is not None])
             subgroup_count = len(group.child_group_ids)
-            details = f"{len(resolved_rules)} rule(s)" + (f", {subgroup_count} subgroup(s)" if subgroup_count else "")
+            details = f"{len(resolved_rules)} rule(s)" + (f" · {subgroup_count} subgroup(s)" if subgroup_count else "")
             counter += 1
             stable_key = f"group:{group.id}"
             rows.append(
@@ -3614,8 +3698,19 @@ class DQToolWebApp:
     def _populate_result_runs(self) -> None:
         if not self.project:
             return
-        rule_id = self._selected_result_rule_id()
-        runs = [run for run in self.project.storage.list_rule_runs() if rule_id is not None and run.rule_id == rule_id]
+        selected = str(self.result_rule_select.value or "")
+        rules_by_id = {rule.id: rule for rule in self._visible_rules() if rule.id is not None}
+        if selected.startswith("rule:"):
+            selected_rule_ids = {int(selected.split(":", 1)[1])}
+        elif selected.startswith("group:"):
+            group_id = int(selected.split(":", 1)[1])
+            groups_by_id = {group.id: group for group in self._visible_groups() if group.id is not None}
+            group = groups_by_id.get(group_id)
+            selected_rule_ids = {rule.id for rule in resolve_group_rules(group, groups_by_id, rules_by_id)[0]} if group else set()
+        else:
+            selected_rule_ids = set()
+        runs = [run for run in self.project.storage.list_rule_runs() if run.rule_id in selected_rule_ids]
+        rule_names = {rule_id: rule.name for rule_id, rule in rules_by_id.items()}
         rows = []
         options: dict[str, str] = {}
         for run in runs:
@@ -3624,14 +3719,17 @@ class DQToolWebApp:
                 {
                     "id": run.id,
                     "run": run.id,
+                    "rule": rule_names.get(run.rule_id, f"Rule #{run.rule_id}"),
                     "status": run.status.upper(),
                     "checked": summary.get("checked_count", ""),
                     "failed": summary.get("failed_count", ""),
                     "started": self._format_timestamp(run.started_at),
+                    "runtime": self._format_runtime(run.runtime_ms),
                     "failed_rows_file": Path(run.failed_rows_path).name if run.failed_rows_path else "",
                 }
             )
-            options[str(run.id)] = f"Run {run.id} | {self._format_timestamp(run.started_at)} | {run.status.upper()}"
+            rule_name = rule_names.get(run.rule_id, f"Rule #{run.rule_id}")
+            options[str(run.id)] = f"{rule_name} | Run {run.id} | {self._format_timestamp(run.started_at)} | {run.status.upper()}"
         self.results_table.rows = rows
         self.results_table.update()
         self._set_select_options(self.result_select, options, self.selected_run_id)
@@ -4223,6 +4321,14 @@ class DQToolWebApp:
         except ValueError:
             return value
 
+    @staticmethod
+    def _format_runtime(runtime_ms: int | None) -> str:
+        if runtime_ms is None:
+            return "-"
+        if runtime_ms < 1000:
+            return f"{runtime_ms} ms"
+        return f"{runtime_ms / 1000:.2f} s"
+
     def _split_csv_text(self, value: Any) -> list[str]:
         return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
@@ -4238,6 +4344,28 @@ class DQToolWebApp:
             if label == "ID":
                 field = "id"
             columns.append({"name": field, "label": label, "field": field, "align": "left"})
+        return columns
+
+    def _tree_table_columns(self, labels: list[str]) -> list[dict[str, str]]:
+        """Compact metadata columns so the tree/name column remains easy to scan."""
+        widths = {
+            "batch": "54px",
+            "id": "52px",
+            "kind": "82px",
+            "owner": "104px",
+            "visibility": "108px",
+            "used_in": "120px",
+            "runs": "64px",
+            "last_status": "104px",
+            "last_run": "154px",
+            "last_failed": "86px",
+        }
+        columns = self._columns(labels)
+        for column in columns:
+            width = widths.get(column["name"])
+            if width:
+                column["style"] = f"width: {width}; max-width: {width};"
+                column["headerStyle"] = f"width: {width};"
         return columns
 
     def _build_table(self, labels: list[str], pagination: int = 10) -> ui.table:
@@ -4418,6 +4546,16 @@ def open_configured_workspace() -> WorkspaceContext | None:
 SCHEDULER_POLL_SECONDS = 60
 
 
+def _format_local_schedule_time(timestamp: str | None) -> str:
+    """Display stored UTC schedule timestamps in Brussels time."""
+    if not timestamp:
+        return "-"
+    try:
+        return datetime.fromisoformat(timestamp).astimezone(BRUSSELS_TIMEZONE).strftime("%Y-%m-%d %H:%M %Z")
+    except ValueError:
+        return timestamp
+
+
 async def _execute_schedule(
     schedule: Schedule,
     project: ProjectContext,
@@ -4439,6 +4577,7 @@ async def _execute_schedule(
                 execution_service.run_rules, rules_to_run, {}, connections, project.results_dir, "scheduler"
             )
             for run in runs:
+                run.schedule_id = schedule.id
                 project.storage.save_rule_run(run)
             if any(run.status == "error" for run in runs):
                 status = "error"
@@ -4452,7 +4591,7 @@ async def _execute_schedule(
         status = "error"
     next_run = compute_next_run(schedule, after=datetime.now(UTC))
     await nicegui_run.io_bound(
-        project.storage.record_schedule_run, schedule.id, utc_now(), next_run.isoformat(), status
+        project.storage.record_schedule_run, schedule.id, utc_now(), next_run.astimezone(UTC).isoformat(), status
     )
 
 

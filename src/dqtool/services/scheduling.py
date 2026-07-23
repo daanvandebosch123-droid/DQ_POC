@@ -1,20 +1,22 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from dqtool.models.entities import Schedule, ScheduleCadence
 
 WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+BRUSSELS_TIMEZONE = ZoneInfo("Europe/Brussels")
 
 
 def compute_next_run(schedule: Schedule, after: datetime | None = None) -> datetime:
-    """The next UTC datetime a schedule should fire, strictly later than `after` (default: now).
+    """The next datetime a schedule should fire, strictly later than `after` (default: Brussels now).
 
     HOURLY fires every `interval_hours` hours from `after`. DAILY fires once a day at
-    `time_of_day` (HH:MM, UTC). WEEKLY fires once a week on `weekday` (0=Monday..6=Sunday)
-    at `time_of_day`.
+    `time_of_day` (HH:MM, Europe/Brussels). WEEKLY fires once a week on `weekday`
+    (0=Monday..6=Sunday) at `time_of_day`.
     """
-    now = (after or datetime.now(UTC)).astimezone(UTC)
+    now = (after or datetime.now(BRUSSELS_TIMEZONE)).astimezone(BRUSSELS_TIMEZONE)
     if schedule.cadence == ScheduleCadence.HOURLY:
         interval = max(1, int(schedule.interval_hours or 1))
         return now + timedelta(hours=interval)
@@ -44,7 +46,7 @@ def describe_cadence(schedule: Schedule) -> str:
         interval = max(1, int(schedule.interval_hours or 1))
         return "Every hour" if interval == 1 else f"Every {interval} hours"
     hour, minute = _parse_time_of_day(schedule.time_of_day)
-    time_text = f"{hour:02d}:{minute:02d} UTC"
+    time_text = f"{hour:02d}:{minute:02d} Brussels time"
     if schedule.cadence == ScheduleCadence.DAILY:
         return f"Daily at {time_text}"
     if schedule.cadence == ScheduleCadence.WEEKLY:

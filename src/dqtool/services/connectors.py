@@ -54,7 +54,6 @@ ODBC_SETTINGS: dict[ConnectionType, OdbcSettings] = {
     ),
 }
 
-
 class ConnectorService:
     def __init__(self) -> None:
         self._encoding_cache: dict[tuple[str, int, int], str] = {}
@@ -255,15 +254,37 @@ class ConnectorService:
             raise RuntimeError("The pyodbc package is not installed. Install it with: pip install pyodbc")
         settings = ODBC_SETTINGS[connection.connection_type]
         username = connection.config.get("username")
-        connection_string = settings.template.format(
-            driver=connection.config.get("driver") or settings.default_driver,
-            host=connection.config.get("host"),
-            port=connection.config.get("port") or settings.default_port,
-            database=connection.config.get("database") or "",
-            username=username,
-            password=password_override or self._database_password(connection, username),
-        )
+        if connection.connection_type == ConnectionType.SYBASE and connection.config.get("sybase_mode") == "iq":
+            connection_string = self._sybase_iq_connection_string(connection, password_override)
+        else:
+            connection_string = settings.template.format(
+                driver=connection.config.get("driver") or settings.default_driver,
+                host=connection.config.get("host"),
+                port=connection.config.get("port") or settings.default_port,
+                database=connection.config.get("database") or "",
+                username=username,
+                password=password_override or self._database_password(connection, username),
+            )
         return pyodbc.connect(connection_string, timeout=10)
+
+    def _sybase_iq_connection_string(self, connection: Connection, password_override: str | None) -> str:
+        """Build a SQL Anywhere/Sybase IQ ODBC connection string."""
+        settings = ODBC_SETTINGS[ConnectionType.SYBASE]
+        username = connection.config.get("username")
+        driver = connection.config.get("driver") or settings.default_driver
+        host = connection.config.get("host")
+        port = connection.config.get("port") or settings.default_port
+        password = password_override or self._database_password(connection, username)
+        parts = [
+            f"DRIVER={{{driver}}}",
+            f"CommLinks=TCPIP{{HOST={host};PORT={port};DOBROADCAST=NONE;VERIFY=NO}}",
+        ]
+        if server_name := str(connection.config.get("server_name") or "").strip():
+            parts.append(f"ENG={server_name}")
+        if database := str(connection.config.get("database") or "").strip():
+            parts.append(f"DBN={database}")
+        parts.extend((f"UID={username}", f"PWD={password}"))
+        return ";".join(parts) + ";"
 
     def _connect_oracle(self, connection: Connection, password_override: str | None = None):
         if oracledb is None:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock, patch
 
-from dqtool.models.entities import Rule, RuleType
+from dqtool.models.entities import Connection, ConnectionType, Rule, RuleType
 from dqtool.services.connectors import ConnectorService
 from dqtool.services.execution import ExecutionService
 
@@ -51,6 +52,32 @@ class DialectSqlTests(unittest.TestCase):
         self.assertIn("TRY_CONVERT(date", failed_sqlserver)
         with self.assertRaises(ValueError):
             self.service._build_rule_sql(rule, "tbl", dialect="db2")
+
+    def test_sybase_iq_uses_sql_anywhere_connection_parameters(self) -> None:
+        connection = Connection(
+            id=1,
+            name="iq",
+            connection_type=ConnectionType.SYBASE,
+            owner_username="tester",
+            config={
+                "host": "iq-server",
+                "port": 12700,
+                "database": "",
+                "username": "reader",
+                "driver": "Sybase IQ",
+                "sybase_mode": "iq",
+                "server_name": "dummy_reader",
+            },
+        )
+        pyodbc_mock = Mock()
+        with patch("dqtool.services.connectors.pyodbc", pyodbc_mock):
+            self.connectors.connect_database(connection, password_override="secret")
+
+        connection_string = pyodbc_mock.connect.call_args.args[0]
+        self.assertIn("CommLinks=TCPIP{HOST=iq-server;PORT=12700;DOBROADCAST=NONE;VERIFY=NO}", connection_string)
+        self.assertIn("ENG=dummy_reader", connection_string)
+        self.assertNotIn("DBN=", connection_string)
+        self.assertNotIn("NA=", connection_string)
 
 
 if __name__ == "__main__":

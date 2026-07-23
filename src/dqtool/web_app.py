@@ -1462,6 +1462,14 @@ class DQToolWebApp:
                 existing.connection_type.value if existing else "", "ODBC Driver 17 for SQL Server"
             )
             odbc_driver = ui.input("ODBC Driver", value=initial_driver).classes("w-full")
+            sybase_mode = ui.select(
+                {"ase": "SAP ASE", "iq": "Sybase IQ / SQL Anywhere"},
+                value=str(existing_config.get("sybase_mode", "ase")),
+                label="Sybase server type",
+            ).classes("w-full")
+            sybase_server_name = ui.input(
+                "IQ Server Name", value=str(existing_config.get("server_name", "")), placeholder="e.g. dummy_reader"
+            ).classes("w-full")
             username = ui.input("Username", value=str(existing_config.get("username", ""))).classes("w-full")
             tns_alias = ui.input("TNS Alias", value=str(existing_config.get("tns_alias", ""))).classes("w-full")
             password = ui.input(
@@ -1487,6 +1495,8 @@ class DQToolWebApp:
                 tns_alias.visible = is_oracle
                 database_name.visible = selected in default_drivers
                 odbc_driver.visible = selected in default_drivers
+                sybase_mode.visible = selected == ConnectionType.SYBASE.value
+                sybase_server_name.visible = selected == ConnectionType.SYBASE.value and sybase_mode.value == "iq"
                 if is_database and port.value in (None, *default_ports.values()):
                     port.value = default_ports.get(selected, 1521)
                 if selected in default_drivers and str(odbc_driver.value or "").strip() in ("", *default_drivers.values()):
@@ -1494,12 +1504,13 @@ class DQToolWebApp:
                 allowed_users.visible = visibility.value == "shared_specific"
                 for element in (
                     csv_picker, host, port, service_name, database_name, odbc_driver,
-                    username, tns_alias, password, allowed_users,
+                    username, tns_alias, password, allowed_users, sybase_mode, sybase_server_name,
                 ):
                     element.update()
 
             connection_type.on_value_change(lambda _event: sync_visibility())
             visibility.on_value_change(lambda _event: sync_visibility())
+            sybase_mode.on_value_change(lambda _event: sync_visibility())
             sync_visibility()
 
             def build_connection(require_name: bool) -> Connection:
@@ -1526,6 +1537,9 @@ class DQToolWebApp:
                         "username": (username.value or "").strip(),
                         "driver": (odbc_driver.value or "").strip() or default_drivers[selected_type.value],
                     }
+                    if selected_type == ConnectionType.SYBASE:
+                        config["sybase_mode"] = str(sybase_mode.value or "ase")
+                        config["server_name"] = str(sybase_server_name.value or "").strip()
                 connection = Connection(
                     id=existing.id if existing else None,
                     name=connection_name or "Unsaved connection",

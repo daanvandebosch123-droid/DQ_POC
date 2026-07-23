@@ -206,6 +206,8 @@ The Schedules page builds execution statistics from `RuleRun` records associated
 
 `ProfilingService` collects source metadata and statistics, persists them as `SourceProfile` records, and supports drift/anomaly comparisons.
 
+For CSV sources it also infers a practical column meaning (for example number, date/time, email or small category), captures a complete value list only for low-cardinality categories, and builds **editable** starter-rule suggestions. Identifier inference recognises common Dutch business suffixes such as `nummer`, `nr`, `code` and `sleutel`, in addition to English-style names. The web layer adds the selected source reference to a suggestion and opens the normal rule dialog; it never saves a suggested rule automatically. This keeps profiling advisory and prevents observed values from silently becoming business policy.
+
 The optional Ollama service uses a locally running Ollama endpoint (normally `http://localhost:11434`) and the configured model. It sends profile/anomaly context rather than full source datasets. Rule execution does not depend on Ollama.
 
 ## UI and state

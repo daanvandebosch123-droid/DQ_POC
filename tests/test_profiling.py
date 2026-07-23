@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dqtool.models.entities import Connection, ConnectionType
 from dqtool.services.connectors import ConnectorService
-from dqtool.services.profiling import ProfilingService, detect_anomalies, source_profile_key
+from dqtool.services.profiling import ProfilingService, detect_anomalies, profile_rule_suggestions, source_profile_key
 from dqtool.services.storage import Storage
 
 
@@ -163,6 +163,67 @@ class DetectAnomaliesTests(unittest.TestCase):
         current = self._profile(10, {"extra": {"null_rate": 0.0, "distinct_count": 10}})
         findings = detect_anomalies(previous, current)
         self.assertEqual([("low", "extra")], [(item["severity"], item["column"]) for item in findings])
+
+
+class ProfileRuleSuggestionTests(unittest.TestCase):
+    def test_suggests_editable_rules_from_profile_signals(self) -> None:
+        profile = {
+            "row_count": 10,
+            "columns": {
+                "customer_id": {
+                    "inferred_type": "number",
+                    "null_rate": 0.0,
+                    "distinct_count": 10,
+                    "min": 1,
+                    "max": 3,
+                },
+                "email": {
+                    "inferred_type": "email",
+                    "null_rate": 0.0,
+                    "distinct_count": 10,
+                },
+                "status": {
+                    "inferred_type": "category",
+                    "null_rate": 0.0,
+                    "distinct_count": 2,
+                    "sample_values": ["ACTIVE", "INACTIVE"],
+                    "min_length": 6,
+                    "max_length": 8,
+                },
+                "created_at": {"inferred_type": "date/time", "null_rate": 0.0, "distinct_count": 10},
+                "ordernummer": {"inferred_type": "number", "null_rate": 0.0, "distinct_count": 9},
+            },
+        }
+
+        suggestions = profile_rule_suggestions(profile)
+        by_name = {suggestion["name"]: suggestion for suggestion in suggestions}
+
+        self.assertEqual(["customer_id"], by_name["customer_id must be unique"]["config"]["columns"])
+        self.assertEqual(1, by_name["customer_id must stay within range"]["config"]["min"])
+        self.assertEqual("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", by_name["email must be a valid email"]["config"]["pattern"])
+        self.assertEqual(["ACTIVE", "INACTIVE"], by_name["status must use allowed values"]["config"]["values"])
+        self.assertEqual(6, by_name["status must have an expected length"]["config"]["min_length"])
+        self.assertEqual("date_validity", by_name["created_at must be a valid date"]["rule_type"])
+        self.assertEqual(
+            ["ordernummer"], by_name["ordernummer must not contain duplicates"]["config"]["columns"]
+        )
+
+    def test_does_not_suggest_allowed_values_for_incomplete_samples(self) -> None:
+        profile = {
+            "row_count": 100,
+            "columns": {
+                "status": {
+                    "inferred_type": "category",
+                    "null_rate": 0.0,
+                    "distinct_count": 3,
+                    "sample_values": ["ACTIVE", "INACTIVE"],
+                }
+            },
+        }
+
+        suggestions = profile_rule_suggestions(profile)
+
+        self.assertNotIn("status must use allowed values", {suggestion["name"] for suggestion in suggestions})
 
 
 if __name__ == "__main__":

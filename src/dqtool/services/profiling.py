@@ -5,7 +5,7 @@ from typing import Any
 
 import duckdb
 
-from dqtool.models.entities import Connection, ConnectionType, utc_now
+from dqtool.models.entities import Connection, ConnectionType, RuleType, utc_now
 from dqtool.services.connectors import ConnectorService
 
 MAX_PROFILED_COLUMNS = 50
@@ -19,6 +19,7 @@ MEAN_SHIFT_STDDEVS = 3.0
 
 DOMINANT_SHARE = 0.8
 MAX_EXAMPLE_VALUES = 5
+MAX_SUGGESTED_VALUES = 10
 OUTLIER_FENCE_MULTIPLIER = 1.5
 EMAIL_LOOSE_PATTERN = "^[^@\\s]+@[^@\\s]+$"
 EMAIL_STRICT_PATTERN = "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
@@ -69,6 +70,7 @@ class ProfilingService:
                 null_percentage = row[index["null_percentage"]]
                 columns[name] = {
                     "type": str(row[index["column_type"]]),
+                    "inferred_type": self._inferred_type(str(row[index["column_type"]])),
                     "null_rate": round(float(null_percentage or 0) / 100.0, 6),
                     "min": self._json_safe(row[index["min"]]),
                     "max": self._json_safe(row[index["max"]]),
@@ -109,17 +111,34 @@ class ProfilingService:
             if not str(stats.get("type", "")).upper().startswith("VARCHAR"):
                 continue
             quoted = '"' + name.replace('"', '""') + '"'
-            non_null, numeric, email_loose, email_strict = con.execute(
+            non_null, numeric, email_loose, email_strict, date_like = con.execute(
                 f"SELECT COUNT({quoted}), "
                 f"COUNT(*) FILTER (WHERE try_cast({quoted} AS DOUBLE) IS NOT NULL), "
                 f"COUNT(*) FILTER (WHERE regexp_matches({quoted}, '{EMAIL_LOOSE_PATTERN}')), "
-                f"COUNT(*) FILTER (WHERE regexp_matches({quoted}, '{EMAIL_STRICT_PATTERN}')) "
+                f"COUNT(*) FILTER (WHERE regexp_matches({quoted}, '{EMAIL_STRICT_PATTERN}')), "
+                f"COUNT(*) FILTER (WHERE try_cast({quoted} AS DATE) IS NOT NULL) "
                 f"FROM profile_view"
             ).fetchone()
             if not non_null:
                 continue
             numeric_share = numeric / non_null
             email_share = email_loose / non_null
+            date_share = date_like / non_null
+            min_length, max_length = con.execute(
+                f"SELECT MIN(length({quoted})), MAX(length({quoted})) FROM profile_view WHERE {quoted} IS NOT NULL"
+            ).fetchone()
+            stats["min_length"] = int(min_length or 0)
+            stats["max_length"] = int(max_length or 0)
+            if date_share >= DOMINANT_SHARE:
+                stats["inferred_type"] = "date/time"
+            elif email_share >= DOMINANT_SHARE:
+                stats["inferred_type"] = "email"
+            elif numeric_share >= DOMINANT_SHARE:
+                stats["inferred_type"] = "numeric text"
+            elif stats.get("distinct_count", 0) <= MAX_SUGGESTED_VALUES:
+                stats["inferred_type"] = "category"
+            if 0 < stats.get("distinct_count", 0) <= MAX_SUGGESTED_VALUES:
+                stats["sample_values"] = self._sample_values(con, quoted)
             if email_share >= DOMINANT_SHARE:
                 malformed = email_loose - email_strict
                 if malformed:
@@ -185,6 +204,14 @@ class ProfilingService:
             values.append(f"'{text}'")
         return ", ".join(values) if values else "(none)"
 
+    def _sample_values(self, con: duckdb.DuckDBPyConnection, quoted: str) -> list[str]:
+        """Return a small, deterministic value set for low-cardinality rule suggestions."""
+        rows = con.execute(
+            f"SELECT DISTINCT {quoted} FROM profile_view WHERE {quoted} IS NOT NULL "
+            f"ORDER BY {quoted} LIMIT {MAX_SUGGESTED_VALUES}"
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
     def _profile_oracle(self, source_config: dict[str, Any], connection: Connection) -> dict[str, Any]:
         sql = self.connector_service.rule_source_sql(source_config)
         dialect = self.connector_service.database_dialect(connection)
@@ -217,6 +244,7 @@ class ProfilingService:
                 distinct = int(values.pop(0))
                 stats: dict[str, Any] = {
                     "type": str(item[1]),
+                    "inferred_type": self._inferred_type(str(item[1])),
                     "null_rate": round(1 - (non_null / row_count), 6) if row_count else 0.0,
                     "distinct_count": distinct,
                     "min": None,
@@ -244,6 +272,107 @@ class ProfilingService:
             return None if value is None else float(value)
         except (TypeError, ValueError):
             return None
+
+    def _inferred_type(self, database_type: str) -> str:
+        value = database_type.upper()
+        if any(marker in value for marker in ("DATE", "TIME")):
+            return "date/time"
+        if any(marker in value for marker in ("NUMBER", "FLOAT", "DECIMAL", "NUMERIC", "INT", "DOUBLE", "REAL")):
+            return "number"
+        if any(marker in value for marker in ("BOOL", "BIT")):
+            return "boolean"
+        return "text"
+
+
+def profile_rule_suggestions(profile: dict[str, Any]) -> list[dict[str, Any]]:
+    """Suggest conservative starter rules from one source profile.
+
+    Suggestions are never saved automatically. They deliberately use observed values as
+    editable starting points, so a user confirms the business meaning before creating a rule.
+    """
+    row_count = int(profile.get("row_count") or 0)
+    suggestions: list[dict[str, Any]] = []
+    for column, stats in profile.get("columns", {}).items():
+        null_rate = float(stats.get("null_rate") or 0)
+        distinct = int(stats.get("distinct_count") or 0)
+        non_null = round(row_count * (1 - null_rate))
+        inferred_type = str(stats.get("inferred_type") or "text")
+        if row_count and null_rate == 0:
+            suggestions.append(_suggestion(
+                RuleType.NOT_NULL, column, {"column": column},
+                f"{column} is complete in this snapshot.",
+            ))
+        if row_count > 1 and null_rate == 0 and distinct == row_count:
+            suggestions.append(_suggestion(
+                RuleType.UNIQUE, column, {"columns": [column]},
+                f"{column} has one distinct value per row.",
+            ))
+        elif _looks_like_identifier(column) and non_null > 1 and distinct < non_null and distinct / non_null >= DOMINANT_SHARE:
+            suggestions.append(_suggestion(
+                RuleType.DUPLICATE, column, {"columns": [column]},
+                f"{column} looks like an identifier but contains {non_null - distinct} repeated value(s).",
+            ))
+        if inferred_type == "date/time":
+            suggestions.append(_suggestion(
+                RuleType.DATE_VALIDITY, column, {"column": column},
+                f"{column} is stored as a date or time value.",
+            ))
+        if inferred_type == "email":
+            suggestions.append(_suggestion(
+                RuleType.REGEX, column, {"column": column, "pattern": r"^[^@\s]+@[^@\s]+\.[^@\s]+$"},
+                f"{column} is predominantly email-shaped.",
+            ))
+        elif inferred_type == "number" and stats.get("min") is not None and stats.get("max") is not None:
+            suggestions.append(_suggestion(
+                RuleType.VALUE_RANGE, column, {"column": column, "min": stats["min"], "max": stats["max"]},
+                f"Observed values range from {stats['min']} to {stats['max']}; review these bounds before saving.",
+            ))
+        sample_values = list(stats.get("sample_values") or [])
+        if (
+            inferred_type == "category"
+            and 1 < distinct <= MAX_SUGGESTED_VALUES
+            and len(sample_values) == distinct
+            and non_null > 0
+        ):
+            suggestions.append(_suggestion(
+                RuleType.ALLOWED_VALUES, column, {"column": column, "values": sample_values},
+                f"{column} has {distinct} observed category value(s); review the list before saving.",
+            ))
+        if inferred_type in {"text", "category", "email"}:
+            min_length = int(stats.get("min_length") or 0)
+            max_length = int(stats.get("max_length") or 0)
+            if min_length > 0 and max_length > 0:
+                suggestions.append(_suggestion(
+                    RuleType.LENGTH,
+                    column,
+                    {"column": column, "min_length": min_length, "max_length": max_length},
+                    f"Observed text lengths range from {min_length} to {max_length}; review these limits before saving.",
+                ))
+    return suggestions[:50]
+
+
+def _suggestion(rule_type: RuleType, column: str, config: dict[str, Any], reason: str) -> dict[str, Any]:
+    names = {
+        RuleType.NOT_NULL: f"{column} must not be null",
+        RuleType.UNIQUE: f"{column} must be unique",
+        RuleType.REGEX: f"{column} must be a valid email",
+        RuleType.VALUE_RANGE: f"{column} must stay within range",
+        RuleType.ALLOWED_VALUES: f"{column} must use allowed values",
+        RuleType.DATE_VALIDITY: f"{column} must be a valid date",
+        RuleType.LENGTH: f"{column} must have an expected length",
+        RuleType.DUPLICATE: f"{column} must not contain duplicates",
+    }
+    return {"rule_type": rule_type.value, "column": column, "name": names[rule_type], "config": config, "reason": reason}
+
+
+def _looks_like_identifier(column: str) -> bool:
+    normalized = column.lower().replace("-", "_").replace(" ", "_")
+    return normalized == "id" or normalized.endswith(
+        (
+            "_id", "_key", "_code", "_number", "_nr",
+            "nummer", "nr", "code", "sleutel",  # Dutch business naming
+        )
+    )
 
 
 def detect_anomalies(previous: dict[str, Any] | None, current: dict[str, Any]) -> list[dict[str, Any]]:

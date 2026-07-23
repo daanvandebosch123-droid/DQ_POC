@@ -147,7 +147,7 @@ The **Schedules tab** runs a single rule or an entire rule group automatically, 
 
 The **Preview tab** shows the first rows of any connection's file or table — a quick sanity check before building rules against it.
 
-The **Anomalies tab** goes further: pick a connection and a file/table, run a check, and it profiles the source (row count, per-column null rate, distinct count, mean, etc.) and compares it against the previous snapshot for that same source to flag drift — row count jumps, null spikes, vanished columns, shifted averages. Each run adds a new snapshot, so trend charts (null rate by column, row count over time) build up as checks accumulate. **Explain with AI** sends the profile and drift findings (not the raw data) to a locally running Ollama model and returns a plain-language summary — see the Ollama note under **Install**.
+The **Anomalies tab** goes further: pick a connection and a file/table, run a check, and it profiles the source (row count, per-column null rate, distinct count, inferred meaning, mean, etc.) and compares it against the previous snapshot for that same source to flag drift — row count jumps, null spikes, vanished columns, shifted averages. Each run adds a new snapshot, so trend charts (null rate by column, row count over time) build up as checks accumulate. It also proposes editable starter rules for complete fields, unique keys, emails, observed numeric ranges, and small category lists; these are never saved automatically. **Explain with AI** sends the profile and drift findings (not the raw data) to a locally running Ollama model and returns a plain-language summary — see the Ollama note under **Install**.
 
 ## Central server for multiple users
 

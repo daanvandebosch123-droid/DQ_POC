@@ -34,7 +34,7 @@ from dqtool.models.entities import (
 from dqtool.services.ai import OllamaService
 from dqtool.services.connectors import ODBC_SETTINGS, ConnectorService
 from dqtool.services.execution import ExecutionService
-from dqtool.services.profiling import ProfilingService, detect_anomalies, source_profile_key
+from dqtool.services.profiling import ProfilingService, detect_anomalies, profile_rule_suggestions, source_profile_key
 from dqtool.services.project import (
     ProjectContext,
     get_connection_secret,
@@ -164,6 +164,8 @@ class DQToolWebApp:
         self.profiling_service = ProfilingService(self.connector_service)
         self.ollama_service = OllamaService()
         self._last_anomaly_report: dict[str, Any] | None = None
+        self._profile_suggestions: list[dict[str, Any]] = []
+        self._selected_profile_suggestion_id: str | None = None
         self.workspace = workspace
         self.project: ProjectContext | None = None
         self.current_project: Project | None = None
@@ -238,6 +240,8 @@ class DQToolWebApp:
         self.anomaly_summary: ui.markdown
         self.anomaly_table: ui.table
         self.profile_table: ui.table
+        self.profile_suggestions_table: ui.table
+        self.profile_suggestion_field_select: ui.select
         self.ai_explanation: ui.markdown
 
     def build(self) -> None:
@@ -948,14 +952,31 @@ class DQToolWebApp:
                         columns=[
                             {"name": "field", "label": "Field", "field": "field", "align": "left"},
                             {"name": "type", "label": "Type", "field": "type", "align": "left"},
+                            {"name": "inferred_type", "label": "Meaning", "field": "inferred_type", "align": "left"},
                             {"name": "null_rate", "label": "Null %", "field": "null_rate", "align": "right"},
                             {"name": "distinct", "label": "Distinct", "field": "distinct", "align": "right"},
+                            {"name": "unique_rate", "label": "Unique %", "field": "unique_rate", "align": "right"},
                             {"name": "mean", "label": "Mean", "field": "mean", "align": "right"},
                         ],
                         rows=[],
                         row_key="field",
                         pagination=8,
                     ).props("flat bordered wrap-cells").classes("dq-table-wrap w-full mt-4")
+            with ui.card().classes("dq-soft-card w-full p-6"):
+                with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
+                    with ui.column().classes("gap-1"):
+                        ui.label("RULE IDEAS").classes("dq-eyebrow")
+                        ui.label("Suggested rules from this profile").classes("dq-panel-title text-xl font-bold")
+                        ui.label("Select an idea, then review and save it as a normal rule.").classes("dq-panel-copy text-sm")
+                    with ui.row().classes("items-center gap-2 flex-wrap"):
+                        self.profile_suggestion_field_select = ui.select(
+                            options={}, label="Field", clearable=True, on_change=self._filter_profile_suggestions
+                        ).props("outlined dense options-dense").classes("min-w-[220px]")
+                        ui.button("Create selected rule", icon="add_task", on_click=self.create_profile_suggested_rule).props(
+                            "outline no-caps"
+                        )
+                self.profile_suggestions_table = self._build_table(["Rule", "Field", "Why"], pagination=8)
+                self.profile_suggestions_table.on("rowClick", self._select_profile_suggestion_row)
             with ui.card().classes("dq-soft-card w-full p-6"):
                 ui.label("AI explanation").classes("dq-panel-title text-xl font-bold")
                 self.ai_explanation = ui.markdown(
@@ -996,19 +1017,39 @@ class DQToolWebApp:
         self.project.storage.save_source_profile(key, profile)
         anomalies = detect_anomalies(previous, profile)
         source_label = target
-        self._last_anomaly_report = {"source_label": source_label, "profile": profile, "anomalies": anomalies}
+        self._last_anomaly_report = {
+            "source_label": source_label,
+            "source_config": source_config,
+            "profile": profile,
+            "anomalies": anomalies,
+        }
+        self._profile_suggestions = profile_rule_suggestions(profile)
+        self._selected_profile_suggestion_id = None
 
         self.profile_table.rows = [
             {
                 "field": name,
                 "type": stats.get("type", ""),
+                "inferred_type": stats.get("inferred_type", "text"),
                 "null_rate": f"{float(stats.get('null_rate') or 0):.1%}",
                 "distinct": stats.get("distinct_count", ""),
+                "unique_rate": f"{(float(stats.get('distinct_count') or 0) / profile['row_count']):.1%}" if profile["row_count"] else "-",
                 "mean": "" if stats.get("mean") is None else f"{stats['mean']:.4g}",
             }
             for name, stats in profile.get("columns", {}).items()
         ]
         self.profile_table.update()
+        suggestion_counts: dict[str, int] = {}
+        for suggestion in self._profile_suggestions:
+            field = str(suggestion["column"])
+            suggestion_counts[field] = suggestion_counts.get(field, 0) + 1
+        self.profile_suggestion_field_select.options = {
+            field: f"{field} · {count} idea{'s' if count != 1 else ''}"
+            for field, count in sorted(suggestion_counts.items())
+        }
+        self.profile_suggestion_field_select.value = None
+        self.profile_suggestion_field_select.update()
+        self._refresh_profile_suggestions()
         self.anomaly_table.rows = [
             {
                 "id": index,
@@ -1043,6 +1084,49 @@ class DQToolWebApp:
             )
         self.anomaly_summary.update()
         self._set_last_action(f"Ran anomaly check for {target}")
+
+    def _select_profile_suggestion_row(self, event: Any) -> None:
+        row = self._row_from_click_event(event)
+        if row is None:
+            return
+        self._selected_profile_suggestion_id = str(row["id"])
+        self._highlight_table_row(self.profile_suggestions_table, row["id"])
+
+    def _filter_profile_suggestions(self, _event: Any = None) -> None:
+        self._selected_profile_suggestion_id = None
+        self._refresh_profile_suggestions()
+
+    def _refresh_profile_suggestions(self) -> None:
+        selected_field = str(self.profile_suggestion_field_select.value or "")
+        self.profile_suggestions_table.rows = [
+            {"id": str(index), "rule": suggestion["name"], "field": suggestion["column"], "why": suggestion["reason"]}
+            for index, suggestion in enumerate(self._profile_suggestions)
+            if not selected_field or suggestion["column"] == selected_field
+        ]
+        self.profile_suggestions_table.selected = []
+        self.profile_suggestions_table.update()
+
+    def create_profile_suggested_rule(self) -> None:
+        if self._selected_profile_suggestion_id is None:
+            ui.notify("Select a suggested rule first.", type="warning")
+            return
+        report = self._last_anomaly_report
+        if report is None:
+            ui.notify("Run an anomaly check first.", type="warning")
+            return
+        try:
+            suggestion = self._profile_suggestions[int(self._selected_profile_suggestion_id)]
+        except (IndexError, ValueError):
+            ui.notify("That suggested rule is no longer available. Run the profile again.", type="warning")
+            return
+        config = {**report["source_config"], **suggestion["config"]}
+        self.show_rule_dialog(
+            suggestion={
+                **suggestion,
+                "config": config,
+                "description": f"Created from source profiling. {suggestion['reason']}",
+            }
+        )
 
     def _connection_from_select(self, select: ui.select) -> Connection | None:
         selected = select.value
@@ -1569,7 +1653,7 @@ class DQToolWebApp:
                 ui.button("Save", on_click=save).props("color=primary")
         dialog.open()
 
-    def show_rule_dialog(self, rule: Rule | None = None) -> None:
+    def show_rule_dialog(self, rule: Rule | None = None, suggestion: dict[str, Any] | None = None) -> None:
         if not self.project:
             ui.notify("Open a project before creating a rule.", type="warning")
             return
@@ -1581,18 +1665,20 @@ class DQToolWebApp:
             key: f"{item.name} · {item.connection_type.value.upper()}"
             for key, item in connections.items()
         }
-        default_connection = next(iter(connections)) if len(connections) == 1 else None
+        suggested_config = dict(suggestion.get("config") or {}) if suggestion else {}
+        suggested_connection = self._id_to_str(suggested_config.get("source_connection_id"))
+        default_connection = suggested_connection if suggested_connection in connections else (next(iter(connections)) if len(connections) == 1 else None)
         with ui.dialog() as dialog, ui.card().classes("dq-rule-dialog w-[980px] max-w-full"):
-            ui.label("Edit Rule" if rule else "Rule").classes("text-xl font-semibold")
+            ui.label("Edit Rule" if rule else "Create rule from profile" if suggestion else "Rule").classes("text-xl font-semibold")
             if rule and rule.id is not None:
                 ui.label(f"Rule ID: {rule.id}").classes("dq-panel-copy text-xs")
-            name = ui.input("Name", value=rule.name if rule else "").classes("w-full")
+            name = ui.input("Name", value=rule.name if rule else str(suggestion.get("name", "")) if suggestion else "").classes("w-full")
             description = ui.textarea(
-                "Description (optional)", value=rule.description if rule else ""
+                "Description (optional)", value=rule.description if rule else str(suggestion.get("description", "")) if suggestion else ""
             ).props("outlined autogrow").classes("w-full")
             rule_type = ui.select(
                 {item.value: RULE_TEMPLATES[item]["name"] for item in RuleType},
-                value=rule.rule_type.value if rule else RuleType.NOT_NULL.value,
+                value=rule.rule_type.value if rule else str(suggestion.get("rule_type")) if suggestion else RuleType.NOT_NULL.value,
                 label="Type",
             ).classes("w-full")
             visibility = ui.select(
@@ -2073,7 +2159,13 @@ class DQToolWebApp:
             target_kind.on_value_change(lambda _event: refresh_target_targets())
             target_name.on_value_change(lambda _event: refresh_target_rule_columns())
 
-            existing_config = normalize_rule_config(rule.rule_type, rule.config) if rule else None
+            existing_config = (
+                normalize_rule_config(rule.rule_type, rule.config)
+                if rule
+                else normalize_rule_config(RuleType(rule_type.value), suggested_config)
+                if suggestion
+                else None
+            )
             if existing_config:
                 source_connection.value = self._id_to_str(existing_config.get("source_connection_id"))
                 source_kind.value = existing_config.get("source_kind") or source_kind.value

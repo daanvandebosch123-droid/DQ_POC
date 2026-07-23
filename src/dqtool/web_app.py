@@ -1363,6 +1363,8 @@ class DQToolWebApp:
                     return
                 csv_file_path.value = str(selected_path)
                 csv_file_path.update()
+                csv_file_name.value = selected_path.name
+                csv_file_name.update()
                 selected_csv_label.text = f"Selected file: {selected_path.name}"
                 selected_csv_label.update()
                 if not (name.value or "").strip():
@@ -1374,6 +1376,8 @@ class DQToolWebApp:
                     handle.write(content)
                 csv_file_path.value = str(target_path)
                 csv_file_path.update()
+                csv_file_name.value = target_path.name
+                csv_file_name.update()
                 selected_csv_label.text = f"Uploaded file: {target_path.name}"
                 selected_csv_label.update()
                 if not (name.value or "").strip():
@@ -1428,11 +1432,16 @@ class DQToolWebApp:
             existing_csv_file = str(existing_config.get("file_path", "")) if existing else ""
             with ui.column().classes("w-full gap-1") as csv_picker:
                 with ui.row().classes("w-full items-end gap-2"):
+                    # Keep the full path for saving/testing, but expose only the safe, readable filename in the form.
                     csv_file_path = ui.input(
-                        "CSV file",
                         value=existing_csv_file,
-                        placeholder=r"C:\Data\customers.csv",
-                    ).props("outlined").classes("grow")
+                    )
+                    csv_file_path.visible = False
+                    csv_file_name = ui.input(
+                        "CSV file",
+                        value=Path(existing_csv_file).name if existing_csv_file else "",
+                        placeholder="No CSV file selected",
+                    ).props("outlined readonly").classes("grow")
                     ui.button("Browse CSV", icon="folder_open", on_click=browse_csv_file).props(
                         "color=primary unelevated no-caps"
                     )
@@ -4514,6 +4523,12 @@ async def pick_server_path(
                     ui.select(
                         drives, label="Drive", on_change=lambda event: navigate(Path(str(event.value)))
                     ).props("outlined dense").classes("w-32")
+        file_search = None
+        if not directories_only:
+            file_search = ui.input(placeholder="Search files...").props("outlined dense clearable prepend-icon=search").classes(
+                "w-full"
+            )
+            file_search.on_value_change(lambda _event: render())
         entries = ui.column().classes("w-full gap-0 h-[300px] overflow-auto rounded border border-[#e2ded7]")
         with ui.row().classes("w-full justify-end gap-2"):
             ui.button("Cancel", on_click=lambda: dialog.submit(None)).props("flat")
@@ -4532,6 +4547,7 @@ async def pick_server_path(
             children = sorted(state["dir"].iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
         except (PermissionError, OSError):
             children = []
+        query = str(file_search.value or "").strip().lower() if file_search else ""
         with entries:
             for child in children:
                 if child.name.startswith(".") or child.name.startswith("$"):
@@ -4545,6 +4561,8 @@ async def pick_server_path(
                         child.name, icon="folder", on_click=lambda _=None, target=child: navigate(target)
                     ).props("flat no-caps align=left").classes("w-full justify-start")
                 elif not directories_only and (not extensions or child.suffix.lower() in extensions):
+                    if query and query not in child.name.lower():
+                        continue
                     ui.button(
                         child.name, icon="description", on_click=lambda _=None, target=child: dialog.submit(target)
                     ).props("flat no-caps align=left").classes("w-full justify-start")

@@ -1502,49 +1502,72 @@ class DQToolWebApp:
             visibility.on_value_change(lambda _event: sync_visibility())
             sync_visibility()
 
+            def build_connection(require_name: bool) -> Connection:
+                selected_type = ConnectionType(connection_type.value)
+                connection_name = (name.value or "").strip()
+                selected_csv_path = Path(str(csv_file_path.value or "").strip())
+                config = {
+                    "file_path": str(selected_csv_path),
+                    "base_path": str(selected_csv_path.parent),
+                }
+                if selected_type == ConnectionType.ORACLE:
+                    config = {
+                        "host": (host.value or "").strip(),
+                        "port": int(port.value or 1521),
+                        "service_name": (service_name.value or "").strip(),
+                        "username": (username.value or "").strip(),
+                        "tns_alias": (tns_alias.value or "").strip(),
+                    }
+                elif selected_type in ODBC_SETTINGS:
+                    config = {
+                        "host": (host.value or "").strip(),
+                        "port": int(port.value or default_ports[selected_type.value]),
+                        "database": (database_name.value or "").strip(),
+                        "username": (username.value or "").strip(),
+                        "driver": (odbc_driver.value or "").strip() or default_drivers[selected_type.value],
+                    }
+                connection = Connection(
+                    id=existing.id if existing else None,
+                    name=connection_name or "Unsaved connection",
+                    connection_type=selected_type,
+                    owner_username=existing.owner_username if existing else self.current_user,
+                    visibility=str(visibility.value),
+                    allowed_users=self._split_csv_text(allowed_users.value),
+                    config=config,
+                    tags=[],
+                )
+                if require_name and not connection_name:
+                    raise ValueError("Connection name is required.")
+                if selected_type == ConnectionType.CSV:
+                    if not str(csv_file_path.value or "").strip():
+                        raise ValueError("Select a CSV file.")
+                    if selected_csv_path.suffix.lower() != ".csv":
+                        raise ValueError("The selected connection file must have a .csv extension.")
+                    if not selected_csv_path.is_file():
+                        raise ValueError(f"CSV file does not exist: {selected_csv_path}")
+                return connection
+
+            async def test_current_connection() -> None:
+                try:
+                    connection = build_connection(require_name=False)
+                    ui.notify(f"Testing {connection.connection_type.value} connection...", type="info")
+                    password_override = str(password.value or "").strip() or None
+                    if password_override is None and existing:
+                        password_override = get_connection_secret(
+                            existing.name, str(existing.config.get("username", ""))
+                        )
+                    ok, message = await nicegui_run.io_bound(
+                        self.connector_service.test_connection, connection, password_override
+                    )
+                    ui.notify(message, type="positive" if ok else "negative")
+                except Exception as exc:
+                    ui.notify(str(exc), type="negative")
+
             def save() -> None:
                 try:
-                    selected_type = ConnectionType(connection_type.value)
-                    selected_csv_path = Path(str(csv_file_path.value or "").strip())
-                    config = {
-                        "file_path": str(selected_csv_path),
-                        "base_path": str(selected_csv_path.parent),
-                    }
-                    if selected_type == ConnectionType.ORACLE:
-                        config = {
-                            "host": (host.value or "").strip(),
-                            "port": int(port.value or 1521),
-                            "service_name": (service_name.value or "").strip(),
-                            "username": (username.value or "").strip(),
-                            "tns_alias": (tns_alias.value or "").strip(),
-                        }
-                    elif selected_type in ODBC_SETTINGS:
-                        config = {
-                            "host": (host.value or "").strip(),
-                            "port": int(port.value or default_ports[selected_type.value]),
-                            "database": (database_name.value or "").strip(),
-                            "username": (username.value or "").strip(),
-                            "driver": (odbc_driver.value or "").strip() or default_drivers[selected_type.value],
-                        }
-                    connection = Connection(
-                        id=existing.id if existing else None,
-                        name=(name.value or "").strip(),
-                        connection_type=selected_type,
-                        owner_username=existing.owner_username if existing else self.current_user,
-                        visibility=str(visibility.value),
-                        allowed_users=self._split_csv_text(allowed_users.value),
-                        config=config,
-                        tags=[],
-                    )
-                    if not connection.name:
-                        raise ValueError("Connection name is required.")
-                    if selected_type == ConnectionType.CSV:
-                        if not str(csv_file_path.value or "").strip():
-                            raise ValueError("Select a CSV file.")
-                        if selected_csv_path.suffix.lower() != ".csv":
-                            raise ValueError("The selected connection file must have a .csv extension.")
-                        if not selected_csv_path.is_file():
-                            raise ValueError(f"CSV file does not exist: {selected_csv_path}")
+                    connection = build_connection(require_name=True)
+                    selected_type = connection.connection_type
+                    config = connection.config
                     connection_id = self.project.storage.save_connection(connection) if self.project else None
                     if selected_type != ConnectionType.CSV:
                         if password.value:
@@ -1566,6 +1589,7 @@ class DQToolWebApp:
 
             with ui.row().classes("justify-end gap-2 w-full"):
                 ui.button("Cancel", on_click=dialog.close).props("flat")
+                ui.button("Test connection", icon="network_check", on_click=test_current_connection).props("outline no-caps")
                 ui.button("Save", on_click=save).props("color=primary")
         dialog.open()
 

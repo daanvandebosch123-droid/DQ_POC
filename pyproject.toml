@@ -12,6 +12,7 @@ dependencies = [
   "nicegui>=2.0.0",
   "duckdb>=1.0.0",
   "oracledb>=2.2.1",
+  "pyodbc>=5.0",
   "tzdata>=2025.1",
 ]
 
@@ -19,15 +20,6 @@ dependencies = [
 dev = [
   "pytest>=8.0",
   "ruff>=0.6",
-]
-sqlserver = [
-  "pyodbc>=5.0",
-]
-db2 = [
-  "pyodbc>=5.0",
-]
-sybase = [
-  "pyodbc>=5.0",
 ]
 
 [project.scripts]

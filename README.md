@@ -26,11 +26,7 @@ python -m venv .venv
 pip install -e .
 ```
 
-CSV and Oracle sources work out of the box. SQL Server, DB2, and Sybase connect over ODBC via `pyodbc`, which is an optional extra:
-
-```powershell
-pip install -e .[sqlserver]   # or [db2], [sybase], or combine: .[sqlserver,db2,sybase]
-```
+CSV, Oracle, SQL Server, DB2, and Sybase support install with the standard `pip install -e .` command. SQL Server, DB2, and Sybase use `pyodbc`, which is included automatically.
 
 Installing the `pyodbc` package is not enough on its own — each database also needs its matching **ODBC driver installed at the OS level** (this is a Windows/system install, not something `pip` can provide):
 

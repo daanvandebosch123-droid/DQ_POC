@@ -124,12 +124,13 @@ class ConnectorService:
                     cursor.execute(queries[connection.connection_type])
                     return [row[0] for row in cursor.fetchall()]
 
+            first_error: Exception | None = None
             with db_conn.cursor() as cursor:
                 try:
                     cursor.execute(queries[connection.connection_type])
                     return [row[0] for row in cursor.fetchall()]
-                except Exception as first_exc:
-                    pass
+                except Exception as exc:
+                    first_error = exc
 
             with db_conn.cursor() as cursor:
                 try:
@@ -146,7 +147,9 @@ class ConnectorService:
                     ]
                     if tables:
                         return sorted(set(tables))
-                    raise first_exc
+                    if first_error is not None:
+                        raise first_error from None
+                    raise
         finally:
             db_conn.close()
 
@@ -210,7 +213,7 @@ class ConnectorService:
         finally:
             db_conn.close()
 
-    def test_connection(self, connection: Connection) -> tuple[bool, str]:
+    def test_connection(self, connection: Connection, password_override: str | None = None) -> tuple[bool, str]:
         try:
             if connection.connection_type == ConnectionType.CSV:
                 selected_file = self.csv_connection_file(connection)
@@ -218,7 +221,7 @@ class ConnectorService:
                     return selected_file.is_file(), f"CSV file {'found' if selected_file.is_file() else 'not found'}: {selected_file}"
                 path = Path(connection.config.get("base_path", ""))
                 return path.is_dir(), f"Legacy CSV folder {'found' if path.is_dir() else 'not found'}: {path}"
-            db_conn = self.connect_database(connection)
+            db_conn = self.connect_database(connection, password_override=password_override)
             db_conn.close()
             return True, f"{connection.connection_type.value.capitalize()} connection succeeded."
         except Exception as exc:
@@ -227,11 +230,11 @@ class ConnectorService:
     def database_dialect(self, connection: Connection) -> str:
         return connection.connection_type.value
 
-    def connect_database(self, connection: Connection):
+    def connect_database(self, connection: Connection, password_override: str | None = None):
         if connection.connection_type == ConnectionType.ORACLE:
-            return self._connect_oracle(connection)
+            return self._connect_oracle(connection, password_override=password_override)
         if connection.connection_type in ODBC_SETTINGS:
-            return self._connect_odbc(connection)
+            return self._connect_odbc(connection, password_override=password_override)
         raise RuntimeError(f"Unsupported database connection type: {connection.connection_type.value}")
 
     def limited_sql(self, sql: str, limit: int, dialect: str) -> str:
@@ -246,7 +249,7 @@ class ConnectorService:
             raise RuntimeError("No saved local password found for this connection.")
         return password
 
-    def _connect_odbc(self, connection: Connection):
+    def _connect_odbc(self, connection: Connection, password_override: str | None = None):
         """Shared pyodbc connect for every ODBC-based type; per-type details live in ODBC_SETTINGS."""
         if pyodbc is None:
             raise RuntimeError("The pyodbc package is not installed. Install it with: pip install pyodbc")
@@ -258,15 +261,15 @@ class ConnectorService:
             port=connection.config.get("port") or settings.default_port,
             database=connection.config.get("database") or "",
             username=username,
-            password=self._database_password(connection, username),
+            password=password_override or self._database_password(connection, username),
         )
         return pyodbc.connect(connection_string, timeout=10)
 
-    def _connect_oracle(self, connection: Connection):
+    def _connect_oracle(self, connection: Connection, password_override: str | None = None):
         if oracledb is None:
             raise RuntimeError("The oracledb package is not available.")
         username = connection.config.get("username")
-        password = get_connection_secret(connection.name, username)
+        password = password_override or get_connection_secret(connection.name, username)
         if not password:
             raise RuntimeError("No saved local Oracle password found for this connection.")
         dsn = connection.config.get("dsn")

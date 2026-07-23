@@ -152,6 +152,8 @@ The **Anomalies tab** goes further: pick a connection and a file/table, run a ch
 
 The profiler proposes editable starter rules for complete fields, unique or duplicated identifier-like fields, date validity, email format, observed numeric ranges, text lengths, and small category lists. Suggestions can be filtered by field, then opened in the normal rule editor; they are never saved automatically. Identifier detection recognises common Dutch names such as `klantnummer`, `artikelnummer`, `ordernummer`, and suffixes including `nummer`, `nr`, `code`, and `sleutel`. **Explain with AI** sends profile and drift findings—not the raw data—to a locally running Ollama model; see the Ollama note under **Install**.
 
+The same profile run includes a **Potential GDPR-sensitive data** review. It flags likely personal data, Article 9 special-category data, and Article 10 criminal-offence data from Dutch/English field names and selected high-confidence value shapes (email, IBAN-like values, Belgian-national-register-number-like values, and IP addresses). The findings show categories and counts, not matching values. This is a heuristic to route data to a privacy owner—not a legal decision or proof that GDPR applies.
+
 ## Dashboard trends
 
 The Dashboard combines a latest-100-execution overview with daily trends from the latest 1,000 executions. The trend cards show pass rate with run volume, failed-row volume, and average runtime. They are operational indicators: a day with only execution errors has no pass-rate value, and a day without stored runtimes has a gap in the runtime chart rather than a misleading zero.

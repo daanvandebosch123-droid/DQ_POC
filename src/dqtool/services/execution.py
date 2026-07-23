@@ -266,7 +266,9 @@ class ExecutionService:
 
     def _run_database_rule(self, rule: Rule, connection: Connection, source_sql: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         dialect = self.connector_service.database_dialect(connection)
-        failed_sql, summary_sql = self._build_rule_sql(rule, f"({source_sql})", dialect=dialect)
+        # SQL Anywhere/Sybase IQ requires a correlation name for a derived table;
+        # other supported database dialects accept it as well.
+        failed_sql, summary_sql = self._build_rule_sql(rule, f"({source_sql}) q", dialect=dialect)
         db_conn = self.connector_service.connect_database(connection)
         try:
             with db_conn.cursor() as cursor:

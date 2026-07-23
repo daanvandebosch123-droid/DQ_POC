@@ -277,6 +277,7 @@ class DQToolWebApp:
         self.anomaly_summary: ui.markdown
         self.anomaly_table: ui.table
         self.profile_table: ui.table
+        self.gdpr_table: ui.table
         self.profile_suggestions_table: ui.table
         self.profile_suggestion_field_select: ui.select
         self.ai_explanation: ui.markdown
@@ -1037,6 +1038,13 @@ class DQToolWebApp:
                 self.profile_suggestions_table = self._build_table(["Rule", "Field", "Why"], pagination=8)
                 self.profile_suggestions_table.on("rowClick", self._select_profile_suggestion_row)
             with ui.card().classes("dq-soft-card w-full p-6"):
+                ui.label("DATA PROTECTION REVIEW").classes("dq-eyebrow")
+                ui.label("Potential GDPR-sensitive data").classes("dq-panel-title text-xl font-bold")
+                ui.label(
+                    "Heuristic flags based on field names and value shapes. Review with your privacy owner; this is not a legal determination."
+                ).classes("dq-panel-copy text-sm")
+                self.gdpr_table = self._build_table(["Severity", "Column", "Category", "Why"], pagination=8)
+            with ui.card().classes("dq-soft-card w-full p-6"):
                 ui.label("AI explanation").classes("dq-panel-title text-xl font-bold")
                 self.ai_explanation = ui.markdown(
                     "Run a check, then use *Explain with AI* to have a local Ollama model describe the findings."
@@ -1109,6 +1117,17 @@ class DQToolWebApp:
         self.profile_suggestion_field_select.value = None
         self.profile_suggestion_field_select.update()
         self._refresh_profile_suggestions()
+        self.gdpr_table.rows = [
+            {
+                "id": index,
+                "severity": finding["severity"].upper(),
+                "column": finding["column"],
+                "category": finding["category"],
+                "why": finding["reason"],
+            }
+            for index, finding in enumerate(profile.get("gdpr_findings") or [])
+        ]
+        self.gdpr_table.update()
         self.anomaly_table.rows = [
             {
                 "id": index,
@@ -1128,6 +1147,8 @@ class DQToolWebApp:
             )
             if anomalies:
                 message += f" Found **{len(anomalies)}** content finding(s) in this snapshot already."
+            if profile.get("gdpr_findings"):
+                message += f" **{len(profile['gdpr_findings'])}** GDPR review flag(s) need human review."
             self.anomaly_summary.content = message
         elif not anomalies:
             self.anomaly_summary.content = (

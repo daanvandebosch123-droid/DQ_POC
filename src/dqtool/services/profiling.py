@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any
 
 import duckdb
@@ -9,6 +10,7 @@ from dqtool.models.entities import Connection, ConnectionType, RuleType, utc_now
 from dqtool.services.connectors import ConnectorService
 
 MAX_PROFILED_COLUMNS = 50
+PROFILE_AGGREGATE_BATCH_SIZE = 8
 
 ROW_COUNT_HIGH = 0.30
 ROW_COUNT_MEDIUM = 0.10
@@ -23,6 +25,23 @@ MAX_SUGGESTED_VALUES = 10
 OUTLIER_FENCE_MULTIPLIER = 1.5
 EMAIL_LOOSE_PATTERN = "^[^@\\s]+@[^@\\s]+$"
 EMAIL_STRICT_PATTERN = "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+
+# Heuristics only: GDPR applicability always depends on the source, purpose and context.
+GDPR_NAME_SIGNALS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("Special category (Article 9): health", "high", ("health", "gezond", "medisch", "medical", "ziekte", "diagnose", "patient")),
+    ("Special category (Article 9): genetic or biometric", "high", ("genetic", "dna", "biometric", "biometr", "vingerafdruk", "fingerprint")),
+    ("Special category (Article 9): racial or ethnic origin", "high", ("ethnic", "etnisch", "race", "racial")),
+    ("Special category (Article 9): political, religious or union", "high", ("politic", "politiek", "relig", "geloof", "union", "vakbond")),
+    ("Special category (Article 9): sex life or sexual orientation", "high", ("sexual", "seks", "orientation", "orientatie")),
+    ("Criminal-offence data (Article 10)", "high", ("criminal", "straf", "convict", "veroord", "offence", "misdrijf")),
+    ("Personal data: direct identifier", "high", ("rijksregister", "nationalid", "nationaalnummer", "bsn", "passport", "paspoort")),
+    ("Personal data: contact detail", "medium", ("email", "mail", "telefoon", "phone", "gsm", "mobile")),
+    ("Personal data: name", "medium", ("voornaam", "achternaam", "naam", "firstname", "lastname", "surname", "fullname")),
+    ("Personal data: birth date", "medium", ("geboorte", "birthdate", "dateofbirth")),
+    ("Personal data: address or location", "medium", ("adres", "address", "straat", "postcode", "location", "locatie", "latitude", "longitude", "gps")),
+    ("Personal data: online identifier", "medium", ("ipaddress", "ipadres", "cookie", "deviceid", "deviceidentifier")),
+    ("Personal data: financial identifier", "medium", ("iban", "bankrekening", "bankaccount", "creditcard", "kaartnummer")),
+)
 
 
 def source_profile_key(source_config: dict[str, Any]) -> str:
@@ -90,11 +109,14 @@ class ProfilingService:
                 for name, distinct in zip(columns, distinct_counts, strict=True):
                     columns[name]["distinct_count"] = int(distinct or 0)
             findings = self._content_findings_duckdb(con, columns, numeric_quartiles)
+            privacy_findings = gdpr_risk_findings(columns)
+            privacy_findings.extend(self._privacy_value_findings_duckdb(con, columns))
             return {
                 "profiled_at": utc_now(),
                 "row_count": int(row_count),
                 "columns": columns,
                 "content_findings": findings,
+                "gdpr_findings": _deduplicate_gdpr_findings(privacy_findings),
             }
         finally:
             con.close()
@@ -212,53 +234,84 @@ class ProfilingService:
         ).fetchall()
         return [str(row[0]) for row in rows]
 
+    def _privacy_value_findings_duckdb(
+        self, con: duckdb.DuckDBPyConnection, columns: dict[str, dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Find high-confidence identifier shapes without returning their values to the UI."""
+        findings: list[dict[str, Any]] = []
+        patterns = (
+            ("Personal data: email address", "medium", EMAIL_STRICT_PATTERN),
+            ("Personal data: IBAN-like financial identifier", "medium", "^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$"),
+            ("Personal data: Belgian national-register-number-like identifier", "high", "^[0-9]{2}\\.[0-9]{2}\\.[0-9]{2}-[0-9]{3}\\.[0-9]{2}$"),
+            ("Personal data: IP address", "medium", "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$"),
+        )
+        for name, stats in columns.items():
+            if not str(stats.get("type", "")).upper().startswith("VARCHAR"):
+                continue
+            quoted = '"' + name.replace('"', '""') + '"'
+            for category, severity, pattern in patterns:
+                count = con.execute(
+                    f"SELECT COUNT(*) FROM profile_view WHERE regexp_matches(upper(trim({quoted})), '{pattern}')"
+                ).fetchone()[0]
+                if count:
+                    findings.append(
+                        _gdpr_finding(
+                            severity, name, category, f"{count} value(s) match a protected identifier pattern; values are not shown."
+                        )
+                    )
+        return findings
+
     def _profile_oracle(self, source_config: dict[str, Any], connection: Connection) -> dict[str, Any]:
         sql = self.connector_service.rule_source_sql(source_config)
-        dialect = self.connector_service.database_dialect(connection)
         db_conn = self.connector_service.connect_database(connection)
         numeric_markers = ("NUMBER", "FLOAT", "DECIMAL", "NUMERIC", "INT", "DOUBLE", "REAL")
         try:
             with db_conn.cursor() as cursor:
-                cursor.execute(self.connector_service.limited_sql(sql, 0, dialect))
+                cursor.execute(self.connector_service.describe_sql(sql))
                 described = cursor.description[:MAX_PROFILED_COLUMNS]
                 numeric_names = {
                     item[0]
                     for item in described
                     if any(marker in str(item[1]).upper() for marker in numeric_markers)
                 }
-                aggregates = ["COUNT(*)"]
-                for item in described:
+                cursor.execute(f"SELECT COUNT(*) FROM ({sql}) q")
+                row_count = int(cursor.fetchone()[0])
+            columns: dict[str, dict[str, Any]] = {}
+            for start in range(0, len(described), PROFILE_AGGREGATE_BATCH_SIZE):
+                batch = described[start : start + PROFILE_AGGREGATE_BATCH_SIZE]
+                aggregates: list[str] = []
+                for item in batch:
                     quoted = '"' + item[0].replace('"', '""') + '"'
-                    aggregates.append(f"COUNT({quoted})")
-                    aggregates.append(f"COUNT(DISTINCT {quoted})")
+                    aggregates.extend((f"COUNT({quoted})", f"COUNT(DISTINCT {quoted})"))
                     if item[0] in numeric_names:
-                        aggregates.extend(
-                            [f"MIN({quoted})", f"MAX({quoted})", f"AVG({quoted})", f"STDDEV({quoted})"]
-                        )
+                        aggregates.extend((f"MIN({quoted})", f"MAX({quoted})", f"AVG({quoted})", f"STDDEV({quoted})"))
                 cursor.execute(f"SELECT {', '.join(aggregates)} FROM ({sql}) q")
                 values = list(cursor.fetchone())
-            row_count = int(values.pop(0))
-            columns: dict[str, dict[str, Any]] = {}
-            for item in described:
-                non_null = int(values.pop(0))
-                distinct = int(values.pop(0))
-                stats: dict[str, Any] = {
-                    "type": str(item[1]),
-                    "inferred_type": self._inferred_type(str(item[1])),
-                    "null_rate": round(1 - (non_null / row_count), 6) if row_count else 0.0,
-                    "distinct_count": distinct,
-                    "min": None,
-                    "max": None,
-                    "mean": None,
-                    "stddev": None,
-                }
-                if item[0] in numeric_names:
-                    stats["min"] = self._json_safe(values.pop(0))
-                    stats["max"] = self._json_safe(values.pop(0))
-                    stats["mean"] = self._to_float(values.pop(0))
-                    stats["stddev"] = self._to_float(values.pop(0))
-                columns[item[0]] = stats
-            return {"profiled_at": utc_now(), "row_count": row_count, "columns": columns}
+                for item in batch:
+                    non_null = int(values.pop(0))
+                    distinct = int(values.pop(0))
+                    stats: dict[str, Any] = {
+                        "type": str(item[1]),
+                        "inferred_type": self._inferred_type(str(item[1])),
+                        "null_rate": round(1 - (non_null / row_count), 6) if row_count else 0.0,
+                        "distinct_count": distinct,
+                        "min": None,
+                        "max": None,
+                        "mean": None,
+                        "stddev": None,
+                    }
+                    if item[0] in numeric_names:
+                        stats["min"] = self._json_safe(values.pop(0))
+                        stats["max"] = self._json_safe(values.pop(0))
+                        stats["mean"] = self._to_float(values.pop(0))
+                        stats["stddev"] = self._to_float(values.pop(0))
+                    columns[item[0]] = stats
+            return {
+                "profiled_at": utc_now(),
+                "row_count": row_count,
+                "columns": columns,
+                "gdpr_findings": gdpr_risk_findings(columns),
+            }
         finally:
             db_conn.close()
 
@@ -349,6 +402,30 @@ def profile_rule_suggestions(profile: dict[str, Any]) -> list[dict[str, Any]]:
                     f"Observed text lengths range from {min_length} to {max_length}; review these limits before saving.",
                 ))
     return suggestions[:50]
+
+
+def gdpr_risk_findings(columns: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return GDPR review flags from field names and inferred types, without exposing values."""
+    findings: list[dict[str, Any]] = []
+    for column, stats in columns.items():
+        normalized = re.sub(r"[^a-z0-9]", "", column.lower())
+        for category, severity, terms in GDPR_NAME_SIGNALS:
+            if any(term in normalized for term in terms):
+                findings.append(_gdpr_finding(severity, column, category, "Column name suggests this data category."))
+                break
+        if stats.get("inferred_type") == "email":
+            findings.append(_gdpr_finding("medium", column, "Personal data: email address", "Field is predominantly email-shaped."))
+    return _deduplicate_gdpr_findings(findings)
+
+
+def _gdpr_finding(severity: str, column: str, category: str, reason: str) -> dict[str, Any]:
+    return {"severity": severity, "column": column, "category": category, "reason": reason}
+
+
+def _deduplicate_gdpr_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique = {(item["column"], item["category"]): item for item in findings}
+    order = {"high": 0, "medium": 1, "low": 2}
+    return sorted(unique.values(), key=lambda item: (order[item["severity"]], item["column"], item["category"]))
 
 
 def _suggestion(rule_type: RuleType, column: str, config: dict[str, Any], reason: str) -> dict[str, Any]:

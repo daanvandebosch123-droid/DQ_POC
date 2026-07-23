@@ -182,6 +182,13 @@ value shapes. Dutch identifier naming (for example `klantnummer`, `ordernummer`,
 `nummer`, `nr`, `code`, and `sleutel`) is considered when identifying likely
 key fields. The user reviews and saves every rule explicitly.
 
+The same analysis layer produces separate GDPR review flags. They identify
+potential personal data, Article 9 special-category signals, and Article 10
+criminal-offence signals from names and high-confidence patterns. Flags contain
+categories, reasons and counts only—never the matching raw values—and are
+presented separately from anomaly findings because they require privacy review,
+not a data-quality verdict.
+
 ## Security boundaries and operational assumptions
 
 - Application passwords are salted PBKDF2-SHA256 hashes.

@@ -6,7 +6,13 @@ from pathlib import Path
 
 from dqtool.models.entities import Connection, ConnectionType
 from dqtool.services.connectors import ConnectorService
-from dqtool.services.profiling import ProfilingService, detect_anomalies, profile_rule_suggestions, source_profile_key
+from dqtool.services.profiling import (
+    ProfilingService,
+    detect_anomalies,
+    gdpr_risk_findings,
+    profile_rule_suggestions,
+    source_profile_key,
+)
 from dqtool.services.storage import Storage
 
 
@@ -224,6 +230,23 @@ class ProfileRuleSuggestionTests(unittest.TestCase):
         suggestions = profile_rule_suggestions(profile)
 
         self.assertNotIn("status must use allowed values", {suggestion["name"] for suggestion in suggestions})
+
+
+class GdprRiskFindingTests(unittest.TestCase):
+    def test_flags_dutch_identifiers_and_special_category_names_without_values(self) -> None:
+        findings = gdpr_risk_findings(
+            {
+                "rijksregisternummer": {"inferred_type": "text"},
+                "medische_diagnose": {"inferred_type": "text"},
+                "contact_email": {"inferred_type": "email"},
+            }
+        )
+
+        by_column = {finding["column"]: finding for finding in findings}
+        self.assertEqual("high", by_column["rijksregisternummer"]["severity"])
+        self.assertIn("Special category", by_column["medische_diagnose"]["category"])
+        self.assertIn("email", by_column["contact_email"]["category"])
+        self.assertNotIn("value", by_column["contact_email"]["reason"].lower())
 
 
 if __name__ == "__main__":

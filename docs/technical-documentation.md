@@ -228,6 +228,23 @@ For CSV sources it also infers a practical column meaning (for example number, d
 
 The profile UI groups/filter suggestions by source field. When a user selects one and chooses **Create selected rule**, the web layer combines the profiled source reference with the suggested settings and opens the normal rule dialog. It never saves a rule automatically. This keeps profiling advisory and prevents observed values from silently becoming business policy. For text-backed date columns, date inference is based on values DuckDB can safely cast as dates; physical database date/time types are also recognised.
 
+### GDPR-sensitive-data review
+
+`gdpr_risk_findings()` produces a separate, heuristic review list. It uses
+Dutch and English column-name signals for contact details, names, birth dates,
+addresses/location, online identifiers, financial identifiers, direct
+identifiers, Article 9 special categories, and Article 10 criminal-offence
+data. For CSV sources, `ProfilingService` also checks high-confidence text
+shapes for email addresses, IBAN-like values, Belgian-national-register-number-
+like values, and IP addresses.
+
+Do not add matched values or samples to a GDPR finding. The UI shows only the
+column, category, reason and match count. This feature is a routing aid for a
+privacy owner; it cannot determine whether a value identifies a person in its
+real context, whether a legal basis exists, or whether processing complies with
+GDPR. Keep the Article 9/10 category labels aligned with the GDPR text when
+changing these heuristics.
+
 The optional Ollama service uses a locally running Ollama endpoint (normally `http://localhost:11434`) and the configured model. It sends profile/anomaly context rather than full source datasets. Rule execution does not depend on Ollama.
 
 ## UI and state

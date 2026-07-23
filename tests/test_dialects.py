@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from dqtool.models.entities import Connection, ConnectionType, Rule, RuleType
 from dqtool.services.connectors import ConnectorService
@@ -24,6 +24,36 @@ class DialectSqlTests(unittest.TestCase):
                 "SELECT * FROM (SELECT 1) q FETCH FIRST 500 ROWS ONLY",
                 self.connectors.limited_sql("SELECT 1", 500, dialect),
             )
+
+    def test_describe_sql_uses_portable_zero_row_predicate(self) -> None:
+        self.assertEqual("SELECT * FROM (SELECT * FROM SPAR.KLANT_INFO) q WHERE 1 = 0", self.connectors.describe_sql("SELECT * FROM SPAR.KLANT_INFO"))
+
+    def test_sybase_rule_sql_uses_an_alias_for_a_derived_source(self) -> None:
+        rule = _rule(RuleType.NOT_NULL, {"column": "CLIENT_ID"})
+        failed_sql, _summary_sql = self.service._build_rule_sql(
+            rule, "(SELECT * FROM SPAR.KLANT_INFO) q", dialect="sybase"
+        )
+
+        self.assertIn("FROM (SELECT * FROM SPAR.KLANT_INFO) q WHERE", failed_sql)
+
+    def test_sybase_rule_column_discovery_uses_zero_row_query(self) -> None:
+        connection = Connection(
+            id=1,
+            name="iq",
+            connection_type=ConnectionType.SYBASE,
+            owner_username="tester",
+            config={"sybase_mode": "iq"},
+        )
+        db_conn = MagicMock()
+        cursor = db_conn.cursor.return_value.__enter__.return_value
+        cursor.description = [("CLIENT_ID", object())]
+        with patch.object(self.connectors, "connect_database", return_value=db_conn):
+            columns = self.connectors._database_source_columns(
+                {"source_kind": "oracle_table", "source_name": "SPAR.KLANT_INFO", "source_sql": ""}, connection
+            )
+
+        self.assertEqual(["CLIENT_ID"], columns)
+        cursor.execute.assert_called_once_with("SELECT * FROM (SELECT * FROM SPAR.KLANT_INFO) q WHERE 1 = 0")
 
     def test_summary_needs_from_clause_on_oracle_and_db2(self) -> None:
         rule = _rule(RuleType.NOT_NULL, {"column": "id"})

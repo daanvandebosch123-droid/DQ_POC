@@ -83,7 +83,7 @@ class ConnectorService:
         sql = dataset.config["sql"] if dataset.dataset_type == DatasetType.ORACLE_SQL else f"SELECT * FROM {dataset.config['table_name']}"
         try:
             with db_conn.cursor() as cursor:
-                cursor.execute(self.limited_sql(sql, 0, self.database_dialect(connection)))
+                cursor.execute(self.describe_sql(sql))
                 return [column[0] for column in cursor.description]
         finally:
             db_conn.close()
@@ -241,6 +241,14 @@ class ConnectorService:
         if dialect in {"sqlserver", "sybase"}:
             return f"SELECT TOP {int(limit)} * FROM ({sql}) q"
         return f"SELECT * FROM ({sql}) q FETCH FIRST {int(limit)} ROWS ONLY"
+
+    def describe_sql(self, sql: str) -> str:
+        """Return a portable zero-row query for cursor column metadata.
+
+        This avoids dialect-specific ``TOP 0``/``FETCH FIRST 0`` behaviour and is
+        particularly important for SAP SQL Anywhere/Sybase IQ ODBC drivers.
+        """
+        return f"SELECT * FROM ({sql}) q WHERE 1 = 0"
 
     def _database_password(self, connection: Connection, username: str | None) -> str:
         password = get_connection_secret(connection.name, username)
@@ -418,7 +426,7 @@ class ConnectorService:
         sql = self.rule_source_sql(source_config)
         try:
             with db_conn.cursor() as cursor:
-                cursor.execute(self.limited_sql(sql, 0, self.database_dialect(connection)))
+                cursor.execute(self.describe_sql(sql))
                 return [column[0] for column in cursor.description]
         finally:
             db_conn.close()

@@ -115,6 +115,7 @@ class Rule:
     rule_type: RuleType
     dataset_id: int | None
     owner_username: str
+    description: str = ""
     visibility: str = "private"
     allowed_users: list[str] = field(default_factory=list)
     config: dict[str, Any] = field(default_factory=dict)

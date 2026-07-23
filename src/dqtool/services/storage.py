@@ -89,6 +89,7 @@ class Storage:
                     rule_type TEXT NOT NULL,
                     dataset_id INTEGER,
                     owner_username TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
                     visibility TEXT NOT NULL,
                     allowed_users_json TEXT NOT NULL,
                     config_json TEXT NOT NULL,
@@ -152,6 +153,9 @@ class Storage:
                 columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
                 if "folder" in columns:
                     conn.execute(f"ALTER TABLE {table} DROP COLUMN folder")
+            rule_columns = {row["name"] for row in conn.execute("PRAGMA table_info(rules)").fetchall()}
+            if "description" not in rule_columns:
+                conn.execute("ALTER TABLE rules ADD COLUMN description TEXT NOT NULL DEFAULT ''")
             # Projects created before nested groups still lack this column.
             group_columns = {row["name"] for row in conn.execute("PRAGMA table_info(rule_groups)").fetchall()}
             if "child_group_ids_json" not in group_columns:
@@ -276,6 +280,7 @@ class Storage:
             rule.rule_type.value,
             rule.dataset_id,
             rule.owner_username,
+            rule.description,
             rule.visibility,
             json.dumps(rule.allowed_users),
             json.dumps(rule.config),
@@ -287,9 +292,9 @@ class Storage:
                 cursor = conn.execute(
                     """
                     INSERT INTO rules(
-                        name, rule_type, dataset_id, owner_username, visibility, allowed_users_json,
+                        name, rule_type, dataset_id, owner_username, description, visibility, allowed_users_json,
                         config_json, tags_json, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     payload,
                 )
@@ -297,7 +302,7 @@ class Storage:
             conn.execute(
                 """
                 UPDATE rules
-                SET name=?, rule_type=?, dataset_id=?, owner_username=?, visibility=?, allowed_users_json=?,
+                SET name=?, rule_type=?, dataset_id=?, owner_username=?, description=?, visibility=?, allowed_users_json=?,
                     config_json=?, tags_json=?, updated_at=?
                 WHERE id=?
                 """,
@@ -362,6 +367,40 @@ class Storage:
                 payload + (group.id,),
             )
             return group.id
+
+    def move_rule_to_group(self, rule_id: int, target_group_id: int, source_group_ids: list[int]) -> None:
+        """Make a rule a direct member of one group and remove selected old memberships.
+
+        ``source_group_ids`` is supplied by the UI after its permission checks, so a
+        project user can move rules between the groups they manage without changing
+        other owners' groups.  All changes are committed together.
+        """
+        with self._session() as conn:
+            if conn.execute("SELECT 1 FROM rules WHERE id = ?", (rule_id,)).fetchone() is None:
+                raise ValueError("The rule no longer exists.")
+            target = conn.execute("SELECT rule_ids_json FROM rule_groups WHERE id = ?", (target_group_id,)).fetchone()
+            if target is None:
+                raise ValueError("The target group no longer exists.")
+
+            now = utc_now()
+            target_rule_ids = json.loads(target["rule_ids_json"])
+            if rule_id not in target_rule_ids:
+                target_rule_ids.append(rule_id)
+                conn.execute(
+                    "UPDATE rule_groups SET rule_ids_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(target_rule_ids), now, target_group_id),
+                )
+
+            for source_group_id in set(source_group_ids) - {target_group_id}:
+                row = conn.execute("SELECT rule_ids_json FROM rule_groups WHERE id = ?", (source_group_id,)).fetchone()
+                if row is None:
+                    continue
+                rule_ids = json.loads(row["rule_ids_json"])
+                if rule_id in rule_ids:
+                    conn.execute(
+                        "UPDATE rule_groups SET rule_ids_json = ?, updated_at = ? WHERE id = ?",
+                        (json.dumps([item for item in rule_ids if item != rule_id]), now, source_group_id),
+                    )
 
     def delete_rule_group(self, group_id: int) -> None:
         with self._session() as conn:
@@ -586,6 +625,7 @@ class Storage:
             rule_type=RuleType(row["rule_type"]),
             dataset_id=row["dataset_id"],
             owner_username=row["owner_username"],
+            description=row["description"],
             visibility=row["visibility"],
             allowed_users=json.loads(row["allowed_users_json"]),
             config=json.loads(row["config_json"]),

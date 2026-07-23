@@ -689,6 +689,9 @@ class DQToolWebApp:
                     ui.button("Add group", icon="create_new_folder", on_click=lambda: self.show_group_dialog()).props(
                         "outline no-caps"
                     )
+                    ui.button("Move to group", icon="drive_file_move", on_click=self.move_selected_rule_to_group).props(
+                        "outline no-caps"
+                    )
                     ui.button("Edit", icon="edit", on_click=self.edit_selected_item).props("outline no-caps")
                     ui.button("Run", icon="play_arrow", on_click=self.run_selected_item).props(
                         "color=secondary unelevated no-caps"
@@ -701,6 +704,7 @@ class DQToolWebApp:
                 self.run_checked_button = ui.button(
                     "Run selected (0)", icon="playlist_play", on_click=self.run_checked_rules
                 ).props("outline no-caps")
+                self.run_checked_button.visible = False
             with ui.row().classes("w-full items-center gap-2 mt-3"):
                 self.overview_search = ui.input(placeholder="Search rules and groups...").props(
                     "outlined dense clearable prepend-icon=search"
@@ -1550,6 +1554,9 @@ class DQToolWebApp:
         with ui.dialog() as dialog, ui.card().classes("dq-rule-dialog w-[980px] max-w-full"):
             ui.label("Edit Rule" if rule else "Rule").classes("text-xl font-semibold")
             name = ui.input("Name", value=rule.name if rule else "").classes("w-full")
+            description = ui.textarea(
+                "Description (optional)", value=rule.description if rule else ""
+            ).props("outlined autogrow").classes("w-full")
             rule_type = ui.select(
                 {item.value: RULE_TEMPLATES[item]["name"] for item in RuleType},
                 value=rule.rule_type.value if rule else RuleType.NOT_NULL.value,
@@ -2149,6 +2156,7 @@ class DQToolWebApp:
                         rule_type=selected_type,
                         dataset_id=None,
                         owner_username=rule.owner_username if rule else self.current_user,
+                        description=str(description.value or "").strip(),
                         visibility=str(visibility.value),
                         allowed_users=self._split_csv_text(allowed_users.value),
                         config=normalized,
@@ -3407,7 +3415,7 @@ class DQToolWebApp:
                     "kind": "rule",
                     "depth": depth,
                     "name": rule.name,
-                    "details": rule.rule_type.value,
+                    "details": rule.rule_type.value + (f" — {rule.description}" if rule.description else ""),
                     "owner": rule.owner_username,
                     "visibility": rule.visibility,
                     "used_in": ", ".join(used_in) if used_in else "-",
@@ -3819,6 +3827,66 @@ class DQToolWebApp:
         else:
             ui.notify("Select a rule or group first.", type="warning")
 
+    def move_selected_rule_to_group(self) -> None:
+        """Offer one-step direct-membership moves from the Rules overview."""
+        if not self.project:
+            ui.notify("Open a project first.", type="warning")
+            return
+        rule = self._selected_rule()
+        if rule is None:
+            ui.notify("Select the rule you want to move first.", type="warning")
+            return
+        if self.current_role != Role.ADMIN and rule.owner_username != self.current_user:
+            ui.notify("You can only move rules that you own.", type="warning")
+            return
+
+        all_groups = self.project.storage.list_rule_groups()
+        manageable_groups = [
+            group for group in all_groups if self.current_role == Role.ADMIN or group.owner_username == self.current_user
+        ]
+        if not manageable_groups:
+            ui.notify("Create a rule group that you own before moving this rule.", type="warning")
+            return
+        direct_memberships = [group for group in all_groups if rule.id in group.rule_ids]
+        manageable_memberships = [group for group in direct_memberships if group in manageable_groups]
+        retained_memberships = [group for group in direct_memberships if group not in manageable_groups]
+        options = {
+            str(group.id): f"{group.name}" + (" (current)" if group in direct_memberships else "")
+            for group in manageable_groups
+            if group.id is not None
+        }
+
+        with ui.dialog() as dialog, ui.card().classes("w-[520px] max-w-full"):
+            ui.label("MOVE RULE").classes("dq-eyebrow")
+            ui.label(f"Move '{rule.name}' to a group").classes("dq-panel-title text-xl font-bold")
+            ui.label(
+                "The rule will be added to the chosen group and removed from your other editable groups."
+            ).classes("dq-panel-copy text-sm")
+            if retained_memberships:
+                ui.label(
+                    "It will remain in groups managed by other users: " + ", ".join(group.name for group in retained_memberships) + "."
+                ).classes("dq-panel-copy text-xs")
+            target = ui.select(options, label="Destination group").props("outlined").classes("w-full")
+
+            def move() -> None:
+                if not target.value:
+                    ui.notify("Choose a destination group.", type="warning")
+                    return
+                target_id = int(target.value)
+                self.project.storage.move_rule_to_group(
+                    int(rule.id or 0), target_id, [int(group.id or 0) for group in manageable_memberships]
+                )
+                destination = next(group.name for group in manageable_groups if group.id == target_id)
+                dialog.close()
+                self.refresh_all()
+                self._set_last_action(f"Moved rule {rule.name} to {destination}")
+                ui.notify(f"Moved '{rule.name}' to {destination}.", type="positive")
+
+            with ui.row().classes("justify-end gap-2 w-full"):
+                ui.button("Cancel", on_click=dialog.close).props("flat")
+                ui.button("Move", icon="drive_file_move", on_click=move).props("color=primary")
+        dialog.open()
+
     async def run_selected_item(self) -> None:
         if self._selected_group() is not None:
             await self.run_selected_group()
@@ -3956,6 +4024,7 @@ class DQToolWebApp:
         if not hasattr(self, "run_checked_button"):
             return
         self.run_checked_button.text = f"Run selected ({len(self._checked_rule_keys)})"
+        self.run_checked_button.visible = bool(self._checked_rule_keys)
         self.run_checked_button.update()
 
     def _visible_overview_rows(self) -> list[dict[str, Any]]:

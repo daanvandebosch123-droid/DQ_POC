@@ -37,12 +37,41 @@ class RuleGroupStorageTests(unittest.TestCase):
         self.storage.delete_rule_group(group_id)
         self.assertEqual([], self.storage.list_rule_groups())
 
+    def test_rule_description_round_trips_through_storage(self) -> None:
+        rule_id = self.storage.save_rule(
+            Rule(
+                id=None,
+                name="documented rule",
+                rule_type=RuleType.NOT_NULL,
+                dataset_id=None,
+                owner_username="tester",
+                description="Customer ID is mandatory for downstream matching.",
+            )
+        )
+
+        rule = next(item for item in self.storage.list_rules() if item.id == rule_id)
+        self.assertEqual("Customer ID is mandatory for downstream matching.", rule.description)
+
     def test_deleting_a_rule_removes_it_from_groups(self) -> None:
         self.storage.save_rule_group(
             RuleGroup(id=None, name="daily checks", owner_username="tester", rule_ids=[self.rule_a, self.rule_b])
         )
         self.storage.delete_rule(self.rule_a)
         self.assertEqual([self.rule_b], self.storage.list_rule_groups()[0].rule_ids)
+
+    def test_move_rule_to_group_replaces_selected_direct_memberships(self) -> None:
+        source_id = self.storage.save_rule_group(
+            RuleGroup(id=None, name="source", owner_username="tester", rule_ids=[self.rule_a, self.rule_b])
+        )
+        destination_id = self.storage.save_rule_group(
+            RuleGroup(id=None, name="destination", owner_username="tester", rule_ids=[self.rule_b])
+        )
+
+        self.storage.move_rule_to_group(self.rule_a, destination_id, [source_id])
+
+        groups = {group.id: group for group in self.storage.list_rule_groups()}
+        self.assertEqual([self.rule_b], groups[source_id].rule_ids)
+        self.assertEqual([self.rule_b, self.rule_a], groups[destination_id].rule_ids)
 
     def test_nested_group_persists_child_group_ids(self) -> None:
         parent_id = self.storage.save_rule_group(

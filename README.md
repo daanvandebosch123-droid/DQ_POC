@@ -186,3 +186,5 @@ Database connection passwords (Oracle, SQL Server, DB2, Sybase — not just Orac
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md).
+For an implementation-focused guide, see
+[docs/technical-documentation.md](docs/technical-documentation.md).

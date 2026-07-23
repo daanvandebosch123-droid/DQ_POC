@@ -195,15 +195,16 @@ class DQToolWebApp:
 
         self.outcomes_chart: ui.echart
         self.top_failures_chart: ui.echart
+        self.slowest_rules_chart: ui.echart
         self.results_outcome_chart: ui.echart
         self.results_trend_chart: ui.echart
         self.anomaly_nulls_chart: ui.echart
         self.anomaly_rowcount_chart: ui.echart
 
-        self.connections_count: ui.label
         self.rules_count: ui.label
         self.runs_count: ui.label
         self.failures_count: ui.label
+        self.pass_rate_count: ui.label
 
         self.members_title: ui.label
         self.members_table: ui.table
@@ -238,9 +239,6 @@ class DQToolWebApp:
         self.anomaly_table: ui.table
         self.profile_table: ui.table
         self.ai_explanation: ui.markdown
-
-        self.export_path_input: ui.input
-        self.import_path_input: ui.input
 
     def build(self) -> None:
         ui.page_title("DQTool")
@@ -563,15 +561,15 @@ class DQToolWebApp:
                                             )
 
                                 with ui.row().classes("w-full gap-4 items-stretch"):
-                                    self._stat_block("Connections", "0", "cable", "#6f6960", "#efece6")
                                     self._stat_block("Rules", "0", "rule", "#8d8579", "#f0eee9")
-                                    self._stat_block("Runs", "0", "play_circle", "#b45309", "#f9f0e3")
-                                    self._stat_block("Failures", "0", "error_outline", "#dc2626", "#fff0f0")
+                                    self._stat_block("Pass rate", "-", "verified", "#15803d", "#edf7ef")
+                                    self._stat_block("Failed / error", "0", "error_outline", "#dc2626", "#fff0f0")
+                                    self._stat_block("Recent runs", "0", "play_circle", "#b45309", "#f9f0e3")
 
                                 with ui.row().classes("w-full items-stretch gap-5"):
                                     with ui.card().classes("dq-soft-card w-full lg:w-[calc(38%-10px)] p-6"):
                                         ui.label("OUTCOMES").classes("dq-eyebrow")
-                                        ui.label("Recent run results").classes("dq-panel-title text-xl font-bold")
+                                        ui.label("Run outcomes").classes("dq-panel-title text-xl font-bold")
                                         self.outcomes_chart = ui.echart(self._empty_chart_options("No runs yet")).classes(
                                             "w-full h-[280px]"
                                         )
@@ -582,35 +580,18 @@ class DQToolWebApp:
                                             "w-full h-[280px]"
                                         )
 
-                                with ui.row().classes("w-full items-stretch gap-5"):
-                                    with ui.card().classes("dq-soft-card w-full lg:w-[calc(62%-10px)] p-6"):
-                                        ui.label("ACTIVITY").classes("dq-eyebrow")
-                                        ui.label("Project overview").classes("dq-panel-title text-2xl font-bold")
-                                        self.dashboard_markdown = ui.markdown("Open a project to begin.").classes("w-full dq-panel-copy mt-2")
+                                with ui.card().classes("dq-soft-card w-full p-6"):
+                                    ui.label("PERFORMANCE").classes("dq-eyebrow")
+                                    ui.label("Slowest rules by average runtime").classes("dq-panel-title text-xl font-bold")
+                                    self.slowest_rules_chart = ui.echart(self._empty_chart_options("No runs yet")).classes(
+                                        "w-full h-[250px]"
+                                    )
 
-                                    with ui.card().classes("dq-soft-card dq-meta-card w-full lg:w-[calc(38%-10px)] p-6"):
-                                        with ui.row().classes("items-center gap-3"):
-                                            with ui.element("div").classes("grid w-11 h-11 rounded-xl bg-stone-200 place-items-center"):
-                                                ui.icon("swap_vert", color="secondary").classes("text-2xl")
-                                            with ui.column().classes("gap-0"):
-                                                ui.label("Metadata transfer").classes("dq-panel-title text-xl font-bold")
-                                                ui.label("Move project definitions as JSON").classes("text-xs text-[#837d74]")
-                                        with ui.column().classes("w-full gap-3 mt-3"):
-                                            self.export_path_input = ui.input(
-                                                "Export path",
-                                                placeholder=r"C:\Users\<you>\Downloads\dqtool-metadata.json",
-                                            ).props("outlined dense").classes("w-full")
-                                            ui.button("Export metadata", icon="file_upload", on_click=self.export_metadata).props(
-                                                "outline no-caps color=primary"
-                                            ).classes("self-start")
-                                            ui.separator().classes("my-1")
-                                            self.import_path_input = ui.input(
-                                                "Import path",
-                                                placeholder=r"C:\Users\<you>\Downloads\dqtool-metadata.json",
-                                            ).props("outlined dense").classes("w-full")
-                                            ui.button("Import metadata", icon="file_download", on_click=self.import_metadata).props(
-                                                "unelevated no-caps color=primary"
-                                            ).classes("self-start")
+                                with ui.row().classes("w-full items-stretch gap-5"):
+                                    with ui.card().classes("dq-soft-card w-full p-6"):
+                                        ui.label("ACTIVITY").classes("dq-eyebrow")
+                                        ui.label("Recent activity").classes("dq-panel-title text-2xl font-bold")
+                                        self.dashboard_markdown = ui.markdown("Open a project to begin.").classes("w-full dq-panel-copy mt-2")
 
                         with ui.tab_panel(connections_tab):
                             self._build_connections_tab()
@@ -1299,34 +1280,6 @@ class DQToolWebApp:
         self._populate_results()
         self._populate_users()
         self._populate_project_members()
-
-    def export_metadata(self) -> None:
-        if not self.project:
-            ui.notify("Open a project first.", type="warning")
-            return
-        path_text = (self.export_path_input.value or "").strip()
-        if not path_text:
-            ui.notify("Enter a JSON path to export metadata.", type="warning")
-            return
-        path = Path(path_text)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.project.storage.export_metadata(), indent=2), encoding="utf-8")
-        self._set_last_action(f"Exported metadata to {path}")
-        ui.notify(f"Exported metadata to {path}", type="positive")
-
-    def import_metadata(self) -> None:
-        if not self.project:
-            ui.notify("Open a project first.", type="warning")
-            return
-        path_text = (self.import_path_input.value or "").strip()
-        if not path_text:
-            ui.notify("Enter a JSON path to import metadata.", type="warning")
-            return
-        payload = json.loads(Path(path_text).read_text(encoding="utf-8"))
-        self.project.storage.import_metadata(payload)
-        self.refresh_all()
-        self._set_last_action(f"Imported metadata from {path_text}")
-        ui.notify(f"Imported metadata from {path_text}", type="positive")
 
     def show_connection_dialog(self, existing: Connection | None = None) -> None:
         existing_config = existing.config if existing else {}
@@ -3176,35 +3129,39 @@ class DQToolWebApp:
 
     def _populate_dashboard(self) -> None:
         if not self.project:
-            self.connections_count.text = "0"
             self.rules_count.text = "0"
             self.runs_count.text = "0"
             self.failures_count.text = "0"
+            self.pass_rate_count.text = "-"
             self.dashboard_markdown.content = "Open a project to begin."
             self.dashboard_markdown.update()
             self._set_chart_options(self.outcomes_chart, self._empty_chart_options("Open a project to see charts"))
             self._set_chart_options(self.top_failures_chart, self._empty_chart_options("Open a project to see charts"))
+            self._set_chart_options(self.slowest_rules_chart, self._empty_chart_options("Open a project to see charts"))
             return
-        connections = self._visible_connections()
         rules = self._visible_rules()
         runs = self.project.storage.list_rule_runs(limit=20)
-        self._update_dashboard_charts(
-            self.project.storage.list_rule_runs(limit=100),
-            {rule.id: rule.name for rule in self.project.storage.list_rules() if rule.id is not None},
-        )
-        failing = [run for run in runs if run.status == "failed"]
-        self.connections_count.text = str(len(connections))
+        dashboard_runs = self.project.storage.list_rule_runs(limit=100)
+        rule_names = {rule.id: rule.name for rule in self.project.storage.list_rules() if rule.id is not None}
+        self._update_dashboard_charts(dashboard_runs, rule_names)
+        unsuccessful = [run for run in dashboard_runs if run.status in {"failed", "error"}]
+        passed = sum(run.status == "passed" for run in dashboard_runs)
+        completed = sum(run.status in {"passed", "failed"} for run in dashboard_runs)
         self.rules_count.text = str(len(rules))
         self.runs_count.text = str(len(runs))
-        self.failures_count.text = str(len(failing))
-        lines = ["### Recent runs", ""]
+        self.failures_count.text = str(len(unsuccessful))
+        self.pass_rate_count.text = f"{(passed / completed * 100):.0f}%" if completed else "-"
+        lines = ["**Latest 20 executions**", ""]
         if not runs:
             lines.append("No runs yet. Create a rule, connect a source, and run your first quality check.")
         for run in runs[:8]:
-            status_marker = "PASS" if run.status.lower() in {"passed", "success"} else run.status.upper()
+            status_marker = {"passed": "PASS", "failed": "FAIL", "error": "ERROR"}.get(run.status.lower(), run.status.upper())
+            rule_name = rule_names.get(run.rule_id, f"Deleted rule #{run.rule_id}")
+            failed_rows = run.summary_json.get("failed_count")
+            failed_detail = f" - {failed_rows} failed row(s)" if failed_rows is not None else ""
             lines.append(
-                f"**{status_marker}** &nbsp; Rule {run.rule_id} on "
-                f"{run.summary_json.get('source_label', 'selected source')}  "
+                f"**{status_marker}** &nbsp; {rule_name}{failed_detail}  "
+                f"{self._format_runtime(run.runtime_ms)}  "
                 f"\n{self._format_timestamp(run.started_at)} · {run.executed_by}\n"
             )
         self.dashboard_markdown.content = "\n".join(lines)
@@ -3215,13 +3172,17 @@ class DQToolWebApp:
         if not runs:
             self._set_chart_options(self.outcomes_chart, self._empty_chart_options("No runs yet"))
             self._set_chart_options(self.top_failures_chart, self._empty_chart_options("No runs yet"))
+            self._set_chart_options(self.slowest_rules_chart, self._empty_chart_options("No runs yet"))
             return
         counts: dict[str, int] = {}
         latest_failed: dict[int, int] = {}
+        runtimes_by_rule: dict[int, list[int]] = {}
         for run in runs:  # runs arrive newest first, so the first run per rule is its latest
             counts[run.status] = counts.get(run.status, 0) + 1
             if run.rule_id not in latest_failed:
                 latest_failed[run.rule_id] = int(run.summary_json.get("failed_count") or 0)
+            if run.runtime_ms is not None:
+                runtimes_by_rule.setdefault(run.rule_id, []).append(run.runtime_ms)
         self._set_chart_options(
             self.outcomes_chart,
             {
@@ -3233,7 +3194,7 @@ class DQToolWebApp:
                         "radius": ["52%", "74%"],
                         "center": ["50%", "44%"],
                         "itemStyle": {"borderColor": "#ffffff", "borderWidth": 2, "borderRadius": 4},
-                        "label": {"formatter": "{b}: {c}", "color": "#37332e"},
+                        "label": {"show": False},
                         "data": [
                             {"value": counts[status], "name": label, "itemStyle": {"color": color}}
                             for status, (label, color) in status_styles.items()
@@ -3251,6 +3212,50 @@ class DQToolWebApp:
             ),
             key=lambda item: item[1],
         )[-8:]
+        slowest_rules = sorted(
+            (
+                (rule_names.get(rule_id, f"Deleted rule #{rule_id}"), round(sum(values) / len(values)))
+                for rule_id, values in runtimes_by_rule.items()
+                if values
+            ),
+            key=lambda item: item[1],
+        )[-8:]
+        if not slowest_rules:
+            self._set_chart_options(self.slowest_rules_chart, self._empty_chart_options("No runtime data yet"))
+        else:
+            self._set_chart_options(
+                self.slowest_rules_chart,
+                {
+                    "grid": {"left": 8, "right": 72, "top": 8, "bottom": 8, "containLabel": True},
+                    "tooltip": {
+                        "trigger": "axis",
+                        "axisPointer": {"type": "shadow"},
+                        "formatter": "{b}<br/>Average runtime: {c} ms",
+                    },
+                    "xAxis": {
+                        "type": "value",
+                        "name": "ms",
+                        "splitNumber": 4,
+                        "splitLine": {"lineStyle": {"color": "#e2ded7"}},
+                        "axisLabel": {"color": "#837d74", "formatter": "{value} ms"},
+                    },
+                    "yAxis": {
+                        "type": "category",
+                        "data": [name for name, _ in slowest_rules],
+                        "axisLabel": {"color": "#5c564d"},
+                        "axisLine": {"lineStyle": {"color": "#e2ded7"}},
+                    },
+                    "series": [
+                        {
+                            "type": "bar",
+                            "data": [runtime for _, runtime in slowest_rules],
+                            "barMaxWidth": 18,
+                            "itemStyle": {"color": "#b45309", "borderRadius": [0, 4, 4, 0]},
+                            "label": {"show": True, "position": "right", "color": "#37332e", "formatter": "{c} ms"},
+                        }
+                    ],
+                },
+            )
         if not top_failing:
             self._set_chart_options(self.top_failures_chart, self._empty_chart_options("No failed rows in the latest runs"))
             return
@@ -4442,13 +4447,13 @@ class DQToolWebApp:
                     f"background: {background}; color: {accent};"
                 ):
                     ui.icon(icon).classes("text-2xl")
-            if label == "Connections":
-                self.connections_count = value_label
-            elif label == "Rules":
+            if label == "Rules":
                 self.rules_count = value_label
-            elif label == "Runs":
+            elif label == "Pass rate":
+                self.pass_rate_count = value_label
+            elif label == "Recent runs":
                 self.runs_count = value_label
-            elif label == "Failures":
+            elif label == "Failed / error":
                 self.failures_count = value_label
 
     def _set_last_action(self, message: str) -> None:

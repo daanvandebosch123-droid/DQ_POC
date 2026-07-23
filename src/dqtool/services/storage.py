@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 import json
 import sqlite3
 from collections.abc import Iterator
@@ -570,36 +569,6 @@ class Storage:
             ).fetchone()
         return json.loads(row["profile_json"]) if row else None
 
-    def export_metadata(self) -> dict[str, Any]:
-        return {
-            "users": [self._entity_to_dict(user) for user in self.list_users()],
-            "connections": [self._entity_to_dict(item) for item in self.list_connections()],
-            "datasets": [self._entity_to_dict(item) for item in self.list_datasets()],
-            "rules": [self._entity_to_dict(item) for item in self.list_rules()],
-        }
-
-    def import_metadata(self, payload: dict[str, Any]) -> None:
-        for user in payload.get("users", []):
-            self.upsert_user(user["username"], Role(user["role"]))
-        for item in payload.get("connections", []):
-            item = dict(item)
-            item["id"] = None
-            item.pop("folder", None)
-            item["connection_type"] = ConnectionType(item["connection_type"])
-            self.save_connection(Connection(**item))
-        for item in payload.get("datasets", []):
-            item = dict(item)
-            item["id"] = None
-            item.pop("folder", None)
-            item["dataset_type"] = DatasetType(item["dataset_type"])
-            self.save_dataset(Dataset(**item))
-        for item in payload.get("rules", []):
-            item = dict(item)
-            item["id"] = None
-            item.pop("folder", None)
-            item["rule_type"] = RuleType(item["rule_type"])
-            self.save_rule(Rule(**item))
-
     def _list_entity(self, table: str, mapper) -> list[Any]:
         with self._session() as conn:
             rows = conn.execute(f"SELECT * FROM {table} ORDER BY name").fetchall()
@@ -676,14 +645,6 @@ class Storage:
             last_status=row["last_status"],
             updated_at=row["updated_at"],
         )
-
-    def _entity_to_dict(self, item: Any) -> dict[str, Any]:
-        # dataclasses.asdict is required because the entities use slots=True (no __dict__).
-        data = dataclasses.asdict(item)
-        for key in ("connection_type", "dataset_type", "rule_type", "role"):
-            if key in data and hasattr(data[key], "value"):
-                data[key] = data[key].value
-        return data
 
     def _dedupe_name(self, table: str, requested_name: str, existing_id: int | None) -> str:
         candidate = requested_name

@@ -2,14 +2,34 @@ from __future__ import annotations
 
 import json
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from dqtool.services.ai import DEFAULT_MODEL, OllamaService
+from dqtool.services import ai as ai_module
+from dqtool.services.ai import DEFAULT_ENDPOINT, DEFAULT_MODEL, OllamaService
 
 
 class OllamaRecommendationTests(unittest.TestCase):
     def test_default_model_is_qwen3_8b(self) -> None:
         self.assertEqual("qwen3:8b", DEFAULT_MODEL)
+
+    def test_default_endpoint_is_shared_cloudflare_endpoint(self) -> None:
+        self.assertEqual("https://ollama.dqpocai.org", DEFAULT_ENDPOINT)
+
+    def test_headers_include_cloudflare_access_service_token_when_saved(self) -> None:
+        service = OllamaService(endpoint="http://ollama.test", model="test-model")
+        with patch.object(ai_module, "get_ollama_access_credentials", return_value=("client-id", "client-secret")):
+            headers = service._headers()
+
+        self.assertEqual("client-id", headers["CF-Access-Client-Id"])
+        self.assertEqual("client-secret", headers["CF-Access-Client-Secret"])
+
+    def test_headers_omit_cloudflare_access_when_no_token_saved(self) -> None:
+        service = OllamaService(endpoint="http://ollama.test", model="test-model")
+        with patch.object(ai_module, "get_ollama_access_credentials", return_value=None):
+            headers = service._headers()
+
+        self.assertNotIn("CF-Access-Client-Id", headers)
+        self.assertNotIn("CF-Access-Client-Secret", headers)
 
     def test_explanation_uses_metadata_without_finding_messages(self) -> None:
         service = OllamaService(endpoint="http://ollama.test", model="test-model")

@@ -66,3 +66,22 @@ class ConnectionSecretTests(unittest.TestCase):
         project.delete_connection_secret("Warehouse", "alice")
 
         self.assertIsNone(project.get_connection_secret("Warehouse", "alice"))
+
+    def test_ollama_access_credentials_use_os_credential_store(self) -> None:
+        project.save_ollama_access_credentials("client-id", "client-secret")
+
+        self.assertEqual(("client-id", "client-secret"), project.get_ollama_access_credentials())
+
+    def test_ollama_access_credentials_missing_returns_none(self) -> None:
+        self.assertIsNone(project.get_ollama_access_credentials())
+
+    def test_ollama_access_credentials_partial_returns_none(self) -> None:
+        project.keyring.set_password(project.KEYRING_SERVICE_NAME, "ollama_cf_access_client_id", "client-id")
+
+        self.assertIsNone(project.get_ollama_access_credentials())
+
+    def test_ollama_access_credentials_delete_removes_both(self) -> None:
+        project.save_ollama_access_credentials("client-id", "client-secret")
+        project.delete_ollama_access_credentials()
+
+        self.assertIsNone(project.get_ollama_access_credentials())

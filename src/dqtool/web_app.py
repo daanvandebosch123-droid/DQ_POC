@@ -31,18 +31,21 @@ from dqtool.models.entities import (
     WorkspaceRole,
     utc_now,
 )
-from dqtool.services.ai import OllamaService
+from dqtool.services.ai import DEFAULT_ENDPOINT, DEFAULT_MODEL, OllamaService
 from dqtool.services.connectors import ODBC_SETTINGS, ConnectorService
 from dqtool.services.execution import ExecutionService
 from dqtool.services.profiling import ProfilingService, detect_anomalies, profile_rule_suggestions, source_profile_key
 from dqtool.services.project import (
     ProjectContext,
     delete_connection_secret,
+    delete_ollama_access_credentials,
     get_connection_secret,
+    get_ollama_access_credentials,
     get_or_create_storage_secret,
     load_settings,
     open_or_create_project,
     save_connection_secret,
+    save_ollama_access_credentials,
     save_settings,
 )
 from dqtool.services.rules import (
@@ -585,6 +588,9 @@ class DQToolWebApp:
                                     "text-sm font-bold text-[#37332e]"
                                 )
                                 self.user_role_label = ui.label(self.workspace_role.value).classes("text-xs text-[#837d74]")
+                            ui.button(icon="smart_toy", on_click=lambda: self.show_ai_settings_dialog()).props(
+                                "flat round color=primary"
+                            ).tooltip("AI settings")
                             with ui.avatar(color="primary", text_color="white"):
                                 ui.icon("person")
                             ui.button(icon="logout", on_click=self.sign_out).props("flat round color=primary").tooltip(
@@ -773,7 +779,7 @@ class DQToolWebApp:
                     )
                     ui.button(
                         "Draft rule with AI", icon="auto_awesome", on_click=lambda: self.show_ai_rule_draft_dialog()
-                    ).props("outline no-caps").tooltip("Uses a local Ollama model; no data leaves this machine")
+                    ).props("outline no-caps").tooltip("Uses the configured Ollama endpoint - review your AI settings before sharing sensitive sources")
                     ui.button("Add group", icon="create_new_folder", on_click=lambda: self.show_group_dialog()).props(
                         "outline no-caps"
                     )
@@ -986,7 +992,7 @@ class DQToolWebApp:
                         ui.label("Run details").classes("dq-panel-title text-xl font-bold")
                         ui.button("Explain with AI", icon="psychology", on_click=self.explain_selected_result).props(
                             "outline dense no-caps"
-                        ).tooltip("Uses a local Ollama model; no data leaves this machine")
+                        ).tooltip("Uses the configured Ollama endpoint - review your AI settings before sharing sensitive sources")
                     self.result_details = ui.markdown("Select a run to view its details.").classes("w-full")
                     self.result_ai_explanation = ui.markdown("").classes("w-full mt-2")
                 with ui.card().classes("dq-soft-card w-full lg:w-[calc(60%-8px)] p-6"):
@@ -1025,10 +1031,10 @@ class DQToolWebApp:
                         )
                         ui.button("Explain with AI", icon="psychology", on_click=self.explain_selected_anomalies).props(
                             "outline no-caps"
-                        ).tooltip("Uses a local Ollama model; no data leaves this machine")
+                        ).tooltip("Uses the configured Ollama endpoint - review your AI settings before sharing sensitive sources")
                         ui.button("Get AI recommendations", icon="tips_and_updates", on_click=self.recommend_ai_actions).props(
                             "outline no-caps"
-                        ).tooltip("Suggests advisory rules and next steps using a local Ollama model")
+                        ).tooltip("Suggests advisory rules and next steps using the configured Ollama endpoint")
                 self.anomaly_summary = ui.markdown(
                     "Select a connection and a file or table, then run a check to build the first baseline."
                 ).classes("w-full mt-2")
@@ -1090,7 +1096,7 @@ class DQToolWebApp:
                         ).props("outlined dense options-dense").classes("min-w-[220px]")
                         ui.button("Prioritize with AI", icon="psychology", on_click=self.prioritize_profile_suggestions).props(
                             "outline no-caps"
-                        ).tooltip("Uses a local Ollama model; no data leaves this machine")
+                        ).tooltip("Uses the configured Ollama endpoint - review your AI settings before sharing sensitive sources")
                         ui.button("Create selected rule", icon="add_task", on_click=self.create_profile_suggested_rule).props(
                             "outline no-caps"
                         )
@@ -1105,12 +1111,12 @@ class DQToolWebApp:
                 self.gdpr_table = self._build_table(["Severity", "Column", "Category", "Why"], pagination=8)
             with ui.card().classes("dq-soft-card w-full p-6"):
                 ui.label("AI assistance").classes("dq-panel-title text-xl font-bold")
-                ui.label("Local-only analysis. Recommendations are advisory and never create rules automatically.").classes(
-                    "dq-panel-copy text-sm"
-                )
+                ui.label(
+                    "Sent to the configured Ollama endpoint. Recommendations are advisory and never create rules automatically."
+                ).classes("dq-panel-copy text-sm")
                 ui.label("Explanation").classes("text-sm font-medium mt-4")
                 self.ai_explanation = ui.markdown(
-                    "Run a check, then use *Explain with AI* to have a local Ollama model describe the findings."
+                    "Run a check, then use *Explain with AI* to have Ollama describe the findings."
                 ).classes("w-full")
                 ui.label("Recommended rules and next steps").classes("text-sm font-medium mt-4")
                 self.ai_recommendations = ui.markdown(
@@ -1174,7 +1180,7 @@ class DQToolWebApp:
         self._profile_suggestions = profile_rule_suggestions(profile)
         self._suggestion_ai_notes = {}
         self._selected_profile_suggestion_id = None
-        self.ai_explanation.content = "Run a check, then use *Explain with AI* to have a local Ollama model describe the findings."
+        self.ai_explanation.content = "Run a check, then use *Explain with AI* to have Ollama describe the findings."
         self.ai_explanation.update()
         self.ai_recommendations.content = (
             "Use *Get AI recommendations* after a check to prioritize rule ideas and follow-up actions."
@@ -1373,12 +1379,12 @@ class DQToolWebApp:
         available = await nicegui_run.io_bound(self.ollama_service.is_available)
         if not available:
             ui.notify(
-                f"Ollama is not reachable on {self.ollama_service.endpoint}. "
-                f"Install it from ollama.com and run: ollama pull {self.ollama_service.model}",
+                f"Ollama is not reachable at {self.ollama_service.endpoint}. "
+                "Check the service token in AI settings, or that the endpoint is up.",
                 type="warning",
             )
             return
-        ui.notify(f"Asking local model {self.ollama_service.model} to prioritize rule ideas...", type="info")
+        ui.notify(f"Asking Ollama ({self.ollama_service.model}) to prioritize rule ideas...", type="info")
         try:
             notes = await nicegui_run.io_bound(
                 self.ollama_service.prioritize_suggestions,
@@ -1461,12 +1467,12 @@ class DQToolWebApp:
         available = await nicegui_run.io_bound(self.ollama_service.is_available)
         if not available:
             ui.notify(
-                f"Ollama is not reachable on {self.ollama_service.endpoint}. "
-                f"Install it from ollama.com and run: ollama pull {self.ollama_service.model}",
+                f"Ollama is not reachable at {self.ollama_service.endpoint}. "
+                "Check the service token in AI settings, or that the endpoint is up.",
                 type="warning",
             )
             return
-        self.ai_explanation.content = f"_Asking local model {self.ollama_service.model}..._"
+        self.ai_explanation.content = f"_Asking Ollama ({self.ollama_service.model})..._"
         self.ai_explanation.update()
         try:
             text = await nicegui_run.io_bound(
@@ -1476,7 +1482,7 @@ class DQToolWebApp:
                 report["anomalies"],
             )
         except Exception as exc:
-            self.ai_explanation.content = f"The local model could not produce an explanation: {exc}"
+            self.ai_explanation.content = f"Ollama could not produce an explanation: {exc}"
             self.ai_explanation.update()
             ui.notify(str(exc), type="negative")
             return
@@ -1492,12 +1498,12 @@ class DQToolWebApp:
         available = await nicegui_run.io_bound(self.ollama_service.is_available)
         if not available:
             ui.notify(
-                f"Ollama is not reachable on {self.ollama_service.endpoint}. "
-                f"Install it from ollama.com and run: ollama pull {self.ollama_service.model}",
+                f"Ollama is not reachable at {self.ollama_service.endpoint}. "
+                "Check the service token in AI settings, or that the endpoint is up.",
                 type="warning",
             )
             return
-        self.ai_recommendations.content = f"_Asking local model {self.ollama_service.model} for recommendations..._"
+        self.ai_recommendations.content = f"_Asking Ollama ({self.ollama_service.model}) for recommendations..._"
         self.ai_recommendations.update()
         try:
             text = await nicegui_run.io_bound(
@@ -1508,7 +1514,7 @@ class DQToolWebApp:
                 self._profile_suggestions,
             )
         except Exception as exc:
-            self.ai_recommendations.content = f"The local model could not produce recommendations: {exc}"
+            self.ai_recommendations.content = f"Ollama could not produce recommendations: {exc}"
             self.ai_recommendations.update()
             ui.notify(str(exc), type="negative")
             return
@@ -2009,6 +2015,74 @@ class DQToolWebApp:
                 ui.button("Save", on_click=save).props("color=primary")
         dialog.open()
 
+    def show_ai_settings_dialog(self) -> None:
+        settings = load_settings()
+        has_credentials = get_ollama_access_credentials() is not None
+        with ui.dialog() as dialog, ui.card().classes("w-[560px] max-w-full gap-3"):
+            with ui.row().classes("items-center gap-3"):
+                with ui.element("div").classes("grid w-10 h-10 rounded-xl bg-stone-200 place-items-center"):
+                    ui.icon("smart_toy", color="primary").classes("text-xl")
+                with ui.column().classes("gap-0"):
+                    ui.label("AI settings").classes("dq-panel-title text-lg font-bold")
+                    ui.label("Configures the Ollama endpoint used by every AI feature in this app.").classes(
+                        "text-xs text-[#837d74]"
+                    )
+            endpoint_input = ui.input(
+                "Ollama endpoint", value=settings.get("ollama_endpoint") or DEFAULT_ENDPOINT
+            ).props("outlined dense").classes("w-full")
+            model_input = ui.input(
+                "Model", value=settings.get("ollama_model") or DEFAULT_MODEL
+            ).props("outlined dense").classes("w-full")
+            ui.label("Cloudflare Access service token").classes("text-sm font-medium mt-2")
+            ui.label(
+                "A service token is already saved - leave both fields blank to keep it."
+                if has_credentials
+                else "Required if the endpoint sits behind Cloudflare Access."
+            ).classes("text-xs text-[#837d74]")
+            client_id_input = ui.input("CF-Access-Client-Id").props("outlined dense").classes("w-full")
+            client_secret_input = ui.input(
+                "CF-Access-Client-Secret", password=True, password_toggle_button=True
+            ).props("outlined dense").classes("w-full")
+            status_label = ui.label("").classes("text-xs text-[#837d74]")
+
+            async def save_and_test() -> None:
+                endpoint = (endpoint_input.value or "").strip() or DEFAULT_ENDPOINT
+                model = (model_input.value or "").strip() or DEFAULT_MODEL
+                current = load_settings()
+                current["ollama_endpoint"] = endpoint
+                current["ollama_model"] = model
+                save_settings(current)
+                client_id = (client_id_input.value or "").strip()
+                client_secret = (client_secret_input.value or "").strip()
+                if client_id or client_secret:
+                    if not (client_id and client_secret):
+                        ui.notify("Enter both the Client Id and Client Secret, or leave both blank.", type="warning")
+                        return
+                    save_ollama_access_credentials(client_id, client_secret)
+                self.ollama_service = OllamaService()
+                status_label.text = "Testing connection..."
+                status_label.update()
+                reachable, detail = await nicegui_run.io_bound(self.ollama_service.check_connection)
+                status_label.text = f"Saved. {detail}"
+                if reachable:
+                    ui.notify("AI settings saved.", type="positive")
+                else:
+                    ui.notify("Saved, but the connection test failed.", type="warning")
+                status_label.update()
+
+            def clear_token() -> None:
+                delete_ollama_access_credentials()
+                self.ollama_service = OllamaService()
+                status_label.text = "Service token cleared."
+                status_label.update()
+                ui.notify("Service token cleared.", type="info")
+
+            with ui.row().classes("justify-end gap-2 w-full mt-2"):
+                ui.button("Clear service token", icon="key_off", on_click=clear_token).props("flat no-caps")
+                ui.button("Cancel", on_click=dialog.close).props("flat")
+                ui.button("Save & test", icon="check", on_click=save_and_test).props("color=primary")
+        dialog.open()
+
     def show_ai_rule_draft_dialog(self) -> None:
         if not self.project:
             ui.notify("Open a project before creating a rule.", type="warning")
@@ -2029,9 +2103,9 @@ class DQToolWebApp:
                 with ui.column().classes("gap-0"):
                     ui.label("Draft rule with AI").classes("dq-panel-title text-lg font-bold")
                     ui.label(
-                        "Pick a data source and describe the check in plain English. A local Ollama model "
-                        "picks the rule type and drafts settings from the source's real field names; you "
-                        "still review everything before saving."
+                        "Pick a data source and describe the check in plain English. Ollama picks the rule "
+                        "type and drafts settings from the source's real field names; you still review "
+                        "everything before saving."
                     ).classes("text-xs text-[#837d74]")
             draft_connection = ui.select(
                 connection_options,
@@ -2049,12 +2123,12 @@ class DQToolWebApp:
                 "Describe the check", placeholder="e.g. the email field must look like a valid email address"
             ).props("outlined autogrow").classes("w-full")
             include_sample_values = ui.checkbox(
-                "Include up to 100 sample values per field (sent to the local Ollama model)", value=False
+                "Include up to 100 sample values per field (sent to the configured Ollama endpoint)", value=False
             ).props("dense")
             ui.label(
-                "Off by default. Helps when field names are coded rather than descriptive, but the values "
-                "are sent to Ollama - only enable this if you trust wherever Ollama is running, since on a "
-                "shared central server those values would be visible there too."
+                "Off by default. Field names and your description already go to the configured Ollama "
+                "endpoint; this additionally sends actual source values, so only enable it for data you're "
+                "comfortable leaving this machine."
             ).classes("text-xs text-[#837d74] -mt-2")
             draft_status = ui.label("").classes("text-xs text-[#837d74]")
 
@@ -2084,8 +2158,8 @@ class DQToolWebApp:
                 available = await nicegui_run.io_bound(self.ollama_service.is_available)
                 if not available:
                     ui.notify(
-                        f"Ollama is not reachable on {self.ollama_service.endpoint}. "
-                        f"Install it from ollama.com and run: ollama pull {self.ollama_service.model}",
+                        f"Ollama is not reachable at {self.ollama_service.endpoint}. "
+                        "Check the service token in AI settings, or that the endpoint is up.",
                         type="warning",
                     )
                     return
@@ -2128,7 +2202,7 @@ class DQToolWebApp:
                         column: [str(row[index])[:80] for row in preview_rows if row[index] is not None]
                         for index, column in enumerate(preview_columns)
                     }
-                draft_status.text = f"Asking local model {self.ollama_service.model}..."
+                draft_status.text = f"Asking Ollama ({self.ollama_service.model})..."
                 draft_status.update()
                 try:
                     draft_result = await nicegui_run.io_bound(
@@ -2141,7 +2215,7 @@ class DQToolWebApp:
                     return
                 drafted_config = draft_result.get("config")
                 if not isinstance(drafted_config, dict):
-                    draft_status.text = "The local model did not return a usable configuration."
+                    draft_status.text = "Ollama did not return a usable configuration."
                     draft_status.update()
                     return
                 selected_type = RuleType(str(draft_result.get("rule_type")))
@@ -3734,12 +3808,12 @@ class DQToolWebApp:
         available = await nicegui_run.io_bound(self.ollama_service.is_available)
         if not available:
             ui.notify(
-                f"Ollama is not reachable on {self.ollama_service.endpoint}. "
-                f"Install it from ollama.com and run: ollama pull {self.ollama_service.model}",
+                f"Ollama is not reachable at {self.ollama_service.endpoint}. "
+                "Check the service token in AI settings, or that the endpoint is up.",
                 type="warning",
             )
             return
-        self.result_ai_explanation.content = f"_Asking local model {self.ollama_service.model}..._"
+        self.result_ai_explanation.content = f"_Asking Ollama ({self.ollama_service.model})..._"
         self.result_ai_explanation.update()
         try:
             text = await nicegui_run.io_bound(
@@ -3751,7 +3825,7 @@ class DQToolWebApp:
                 run.status,
             )
         except Exception as exc:
-            self.result_ai_explanation.content = f"The local model could not produce an explanation: {exc}"
+            self.result_ai_explanation.content = f"Ollama could not produce an explanation: {exc}"
             self.result_ai_explanation.update()
             ui.notify(str(exc), type="negative")
             return

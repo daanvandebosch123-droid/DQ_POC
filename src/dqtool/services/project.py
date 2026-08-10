@@ -125,6 +125,32 @@ def _connection_secret_key(connection_name: str, username: str) -> str:
     return f"{username}:{connection_name}"
 
 
+_OLLAMA_CLIENT_ID_KEY = "ollama_cf_access_client_id"
+_OLLAMA_CLIENT_SECRET_KEY = "ollama_cf_access_client_secret"
+
+
+def save_ollama_access_credentials(client_id: str, client_secret: str) -> None:
+    """Store the Cloudflare Access service token for the shared Ollama endpoint in the OS credential store."""
+    keyring.set_password(KEYRING_SERVICE_NAME, _OLLAMA_CLIENT_ID_KEY, client_id)
+    keyring.set_password(KEYRING_SERVICE_NAME, _OLLAMA_CLIENT_SECRET_KEY, client_secret)
+
+
+def get_ollama_access_credentials() -> tuple[str, str] | None:
+    client_id = keyring.get_password(KEYRING_SERVICE_NAME, _OLLAMA_CLIENT_ID_KEY)
+    client_secret = keyring.get_password(KEYRING_SERVICE_NAME, _OLLAMA_CLIENT_SECRET_KEY)
+    if not client_id or not client_secret:
+        return None
+    return client_id, client_secret
+
+
+def delete_ollama_access_credentials() -> None:
+    for key in (_OLLAMA_CLIENT_ID_KEY, _OLLAMA_CLIENT_SECRET_KEY):
+        try:
+            keyring.delete_password(KEYRING_SERVICE_NAME, key)
+        except PasswordDeleteError:
+            pass
+
+
 def _remove_legacy_connection_secret(secrets: dict[str, Any], secret_key: str) -> None:
     passwords = secrets.get("oracle_passwords")
     if not isinstance(passwords, dict):

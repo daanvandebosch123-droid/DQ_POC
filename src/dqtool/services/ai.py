@@ -7,10 +7,10 @@ import urllib.request
 from typing import Any
 
 from dqtool.models.entities import RuleType
-from dqtool.services.project import load_settings
+from dqtool.services.project import get_ollama_access_credentials, load_settings
 from dqtool.services.rules import RULE_CONFIG_EXAMPLES, RULE_TEMPLATES
 
-DEFAULT_ENDPOINT = "http://localhost:11434"
+DEFAULT_ENDPOINT = "https://ollama.dqpocai.org"
 DEFAULT_MODEL = "qwen3:8b"
 
 EXPLANATION_SYSTEM_PROMPT = (
@@ -75,19 +75,49 @@ DRAFT_CONFIG_SHAPES: dict[RuleType, dict[str, Any]] = {
 
 
 class OllamaService:
-    """Minimal client for a locally running Ollama server. No data leaves the machine."""
+    """Client for the shared Ollama endpoint, reached through Cloudflare Access.
+
+    The endpoint sits behind Cloudflare Access, authenticated with a service token (a
+    CF-Access-Client-Id / CF-Access-Client-Secret header pair), rather than being a purely
+    local process - so unlike a plain localhost Ollama, requests do leave this machine.
+    """
 
     def __init__(self, endpoint: str | None = None, model: str | None = None) -> None:
         settings = load_settings()
         self.endpoint = (endpoint or settings.get("ollama_endpoint") or DEFAULT_ENDPOINT).rstrip("/")
         self.model = model or settings.get("ollama_model") or DEFAULT_MODEL
 
+    def _headers(self) -> dict[str, str]:
+        # Cloudflare's bot protection blocks Python's default urllib User-Agent outright,
+        # so every request must identify itself as the app instead.
+        headers = {"Content-Type": "application/json", "User-Agent": "DQTool/0.1"}
+        credentials = get_ollama_access_credentials()
+        if credentials:
+            client_id, client_secret = credentials
+            headers["CF-Access-Client-Id"] = client_id
+            headers["CF-Access-Client-Secret"] = client_secret
+        return headers
+
     def is_available(self) -> bool:
+        return self.check_connection()[0]
+
+    def check_connection(self) -> tuple[bool, str]:
+        """Probe the endpoint and describe the outcome, distinguishing auth rejection from downtime."""
+        request = urllib.request.Request(f"{self.endpoint}/api/tags", headers=self._headers())
         try:
-            with urllib.request.urlopen(f"{self.endpoint}/api/tags", timeout=2) as response:
-                return response.status == 200
-        except (urllib.error.URLError, OSError, ValueError):
-            return False
+            with urllib.request.urlopen(request, timeout=5) as response:
+                if response.status == 200:
+                    return True, f"Connected to {self.endpoint}."
+                return False, f"{self.endpoint} answered HTTP {response.status}."
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                return False, (
+                    f"{self.endpoint} rejected the request (HTTP {exc.code}). The Cloudflare Access service "
+                    "token is missing, wrong, or the Access application has no Service Auth policy for it."
+                )
+            return False, f"{self.endpoint} answered HTTP {exc.code}."
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return False, f"{self.endpoint} is not reachable: {exc}"
 
     def chat(self, prompt: str, system: str | None = None, timeout: float = 120.0) -> str:
         messages = []
@@ -98,12 +128,17 @@ class OllamaService:
         request = urllib.request.Request(
             f"{self.endpoint}/api/chat",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=self._headers(),
         )
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise RuntimeError(
+                    f"Ollama returned HTTP {exc.code}. Cloudflare Access rejected the request - check the "
+                    "CF-Access-Client-Id / CF-Access-Client-Secret service token in AI settings."
+                ) from None
             detail = ""
             try:
                 detail = json.loads(exc.read().decode("utf-8")).get("error", "")

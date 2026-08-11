@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from dqtool.models.entities import Rule, RuleRun, RuleType
 from dqtool.web_app import DQToolWebApp
 
 
@@ -44,6 +45,36 @@ class WebSelectionTests(unittest.TestCase):
         self.assertEqual("12", self.app.result_select.value)
         self.assertEqual([{"id": 12, "status": "FAILED"}], self.app.results_table.selected)
         self.app.view_selected_result.assert_called_once_with()
+
+    def test_freshness_message_describes_the_newest_value_not_a_failed_row(self) -> None:
+        rule = Rule(
+            id=7,
+            name="Recent loads",
+            rule_type=RuleType.DATA_FRESHNESS,
+            dataset_id=None,
+            owner_username="tester",
+            config={"column": "loaded_at", "max_age_days": 1},
+        )
+        run = RuleRun(
+            id=12,
+            rule_id=7,
+            dataset_id=0,
+            status="failed",
+            executed_by="tester",
+            started_at="2026-08-11T10:00:00+00:00",
+            finished_at="2026-08-11T10:00:01+00:00",
+            summary_json={
+                "latest_value": "2026-08-08T00:00:00+00:00",
+                "freshness_age_days": 3.42,
+                "max_age_days": 1,
+            },
+        )
+
+        message = self.app._freshness_run_message(rule, run)
+
+        self.assertIn("newest 'loaded_at' value", message)
+        self.assertIn("maximum allowed age is 1 day", message)
+        self.assertNotIn("of 1,000 rows", message)
 
 
 if __name__ == "__main__":

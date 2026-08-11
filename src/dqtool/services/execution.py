@@ -261,8 +261,6 @@ class ExecutionService:
             if rule.rule_type == RuleType.REFERENTIAL_INTEGRITY:
                 target_source = self._extract_target_source_config(rule.config)
                 return self._execute_referential_integrity_rule_sources(rule, rule.config, target_source, connections)
-            if rule.rule_type == RuleType.DATA_FRESHNESS:
-                return self._execute_freshness_rule_source(rule, rule.config, connections)
             return self._execute_rule_source(rule, rule.config, connections)
 
         dataset = datasets[rule.dataset_id or 0]
@@ -717,6 +715,17 @@ class ExecutionService:
         escaped = str(value).replace("'", "''")
         return f"'{escaped}'"
 
+    def _date_literal(self, value: Any, dialect: str) -> str:
+        """Build an unambiguous ISO date literal for each supported source dialect."""
+        literal = self._escape_literal(value)
+        if dialect in {"duckdb", "oracle"}:
+            return f"DATE {literal}"
+        if dialect == "db2":
+            return f"DATE({literal})"
+        if dialect in {"sqlserver", "sybase"}:
+            return f"CAST({literal} AS DATE)"
+        return literal
+
     def _sql_number(self, value: Any, setting: str) -> str:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             try:
@@ -804,7 +813,12 @@ class ExecutionService:
             predicate = support.date_fail_predicate.format(
                 column=column, text_column=self._text_expr(column, dialect)
             )
-            failed_sql = f"SELECT * FROM {relation_name} WHERE {column} IS NULL OR {predicate}"
+            predicates = [f"{column} IS NULL", predicate]
+            if config.get("min_date"):
+                predicates.append(f"{column} < {self._date_literal(config['min_date'], dialect)}")
+            if config.get("max_date"):
+                predicates.append(f"{column} > {self._date_literal(config['max_date'], dialect)}")
+            failed_sql = f"SELECT * FROM {relation_name} WHERE {' OR '.join(predicates)}"
         elif rule.rule_type == RuleType.CUSTOM_SQL_FAIL_ROWS:
             failed_sql = config["sql"]
         elif rule.rule_type == RuleType.CUSTOM_SQL_THRESHOLD:

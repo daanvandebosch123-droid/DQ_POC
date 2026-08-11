@@ -84,6 +84,14 @@ class RuleValidationTests(unittest.TestCase):
 
         self.assertIn("Maximum age (days) cannot be negative.", errors)
 
+    def test_date_validity_rejects_an_invalid_date_boundary(self) -> None:
+        errors = validate_rule_config(
+            RuleType.DATE_VALIDITY,
+            {"column": "subscription_date", "min_date": "01/01/2022"},
+        )
+
+        self.assertIn("Earliest allowed date must use YYYY-MM-DD format.", errors)
+
 
 if __name__ == "__main__":
     unittest.main()

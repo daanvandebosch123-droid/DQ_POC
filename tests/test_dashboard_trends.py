@@ -3,13 +3,15 @@ from __future__ import annotations
 import unittest
 
 from dqtool.models.entities import RuleRun
-from dqtool.web_app import dashboard_daily_metrics, missing_or_blank_percent
+from dqtool.web_app import dashboard_daily_metrics, filter_runs_for_rule, missing_or_blank_percent
 
 
-def _run(status: str, started_at: str, failed_count: int = 0, runtime_ms: int | None = None) -> RuleRun:
+def _run(
+    status: str, started_at: str, failed_count: int = 0, runtime_ms: int | None = None, rule_id: int = 1
+) -> RuleRun:
     return RuleRun(
         id=None,
-        rule_id=1,
+        rule_id=rule_id,
         dataset_id=0,
         status=status,
         executed_by="tester",
@@ -48,6 +50,17 @@ class DashboardTrendTests(unittest.TestCase):
         self.assertEqual(30, len(days))
         self.assertEqual("2026-06-02", days[0])
         self.assertEqual("2026-07-01", days[-1])
+
+    def test_filter_runs_for_rule_excludes_other_rules(self) -> None:
+        runs = [
+            _run("passed", "2026-07-20T10:00:00+00:00", rule_id=1),
+            _run("failed", "2026-07-20T11:00:00+00:00", rule_id=2),
+        ]
+
+        selected_runs = filter_runs_for_rule(runs, 1)
+
+        self.assertEqual([1], [run.rule_id for run in selected_runs])
+        self.assertEqual([], filter_runs_for_rule(runs, None))
 
 
 if __name__ == "__main__":

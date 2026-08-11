@@ -119,6 +119,13 @@ def dashboard_daily_metrics(runs: list[RuleRun]) -> tuple[list[str], list[float 
     return days, pass_rates, volumes, failed_rows, average_runtimes
 
 
+def filter_runs_for_rule(runs: list[RuleRun], rule_id: int | None) -> list[RuleRun]:
+    """Return only the execution history belonging to one rule."""
+    if rule_id is None:
+        return []
+    return [run for run in runs if run.rule_id == rule_id]
+
+
 def missing_or_blank_percent(stats: dict[str, Any]) -> float:
     """Combine separate SQL-null and blank rates for the completeness chart."""
     return round((float(stats.get("null_rate") or 0) + float(stats.get("blank_rate") or 0)) * 100, 1)
@@ -976,7 +983,7 @@ class DQToolWebApp:
             with ui.row().classes("w-full items-stretch gap-4"):
                 with ui.card().classes("dq-soft-card w-full lg:w-[calc(50%-8px)] p-6"):
                     ui.label("TREND").classes("dq-eyebrow")
-                    ui.label("Run outcomes per day").classes("dq-panel-title text-xl font-bold")
+                    ui.label("Run outcomes per day (selected rule)").classes("dq-panel-title text-xl font-bold")
                     self.results_outcome_chart = ui.echart(self._empty_chart_options("No runs yet")).classes(
                         "w-full h-[260px]"
                     )
@@ -2405,6 +2412,9 @@ class DQToolWebApp:
                     ui.label("Fails when the newest selected date/timestamp is older than this age.").classes(
                         "dq-panel-copy text-xs self-center"
                     )
+                with ui.row().classes("w-full gap-3 flex-wrap") as date_range_fields:
+                    min_date = ui.input("Earliest allowed date", placeholder="YYYY-MM-DD").classes("grow min-w-[180px]")
+                    max_date = ui.input("Latest allowed date", placeholder="YYYY-MM-DD").classes("grow min-w-[180px]")
                 allowed_values = ui.input("Allowed values *", placeholder="ACTIVE, INACTIVE").classes("w-full")
                 rule_sql = ui.textarea("Rule SQL *").props("autogrow").classes("w-full font-mono")
                 with ui.row().classes("w-full gap-3 flex-wrap") as threshold_fields:
@@ -2452,6 +2462,8 @@ class DQToolWebApp:
                 min_length.value = config.get("min_length", 1)
                 max_length.value = config.get("max_length", 20)
                 max_age_days.value = config.get("max_age_days", 1)
+                min_date.value = config.get("min_date", "")
+                max_date.value = config.get("max_date", "")
                 allowed_values.value = ", ".join(str(value) for value in config.get("values", []))
                 rule_sql.value = config.get("sql", "")
                 threshold_operator.value = config.get("operator", ">")
@@ -2460,7 +2472,7 @@ class DQToolWebApp:
                 target_relation.value = config.get("target_relation", "")
                 for element in (
                     field_select, fields_select, min_count, max_count, min_value, max_value,
-                    regex_pattern, min_length, max_length, max_age_days, allowed_values, rule_sql,
+                    regex_pattern, min_length, max_length, max_age_days, min_date, max_date, allowed_values, rule_sql,
                     threshold_operator, threshold_value, target_key_select, target_relation,
                 ):
                     element.update()
@@ -2485,6 +2497,7 @@ class DQToolWebApp:
                 regex_pattern.visible = selected_type == RuleType.REGEX
                 length_fields.visible = selected_type == RuleType.LENGTH
                 freshness_fields.visible = selected_type == RuleType.DATA_FRESHNESS
+                date_range_fields.visible = selected_type == RuleType.DATE_VALIDITY
                 allowed_values.visible = selected_type == RuleType.ALLOWED_VALUES
                 rule_sql.visible = selected_type in {
                     RuleType.CUSTOM_SQL_FAIL_ROWS,
@@ -2504,7 +2517,7 @@ class DQToolWebApp:
                 fields_select.props["label"] = "Comparison fields *" if selected_type == RuleType.KEYED_COMPARISON else "Fields *"
                 for element in (
                     field_select, fields_select, row_count_fields, value_range_fields, regex_pattern,
-                    length_fields, freshness_fields, allowed_values, rule_sql, threshold_fields,
+                    length_fields, freshness_fields, date_range_fields, allowed_values, rule_sql, threshold_fields,
                     target_key_select, target_relation,
                 ):
                     element.update()
@@ -2815,7 +2828,7 @@ class DQToolWebApp:
                     )
                 setting_keys = {
                     "column", "columns", "min_count", "max_count", "min", "max", "pattern",
-                    "min_length", "max_length", "max_age_days", "values", "sql", "operator", "threshold",
+                    "min_length", "max_length", "max_age_days", "min_date", "max_date", "values", "sql", "operator", "threshold",
                     "source_key", "target_key", "key_column", "compare_columns", "target_relation",
                     "fail_threshold_count", "fail_threshold_percent",
                 }
@@ -2843,6 +2856,9 @@ class DQToolWebApp:
                     merged["max_length"] = int(max_length.value or 0)
                 elif selected_type == RuleType.DATA_FRESHNESS:
                     merged["max_age_days"] = int(max_age_days.value or 0)
+                elif selected_type == RuleType.DATE_VALIDITY:
+                    merged["min_date"] = str(min_date.value or "").strip()
+                    merged["max_date"] = str(max_date.value or "").strip()
                 elif selected_type == RuleType.ALLOWED_VALUES:
                     merged["values"] = self._split_csv_text(allowed_values.value)
                 elif selected_type in {RuleType.CUSTOM_SQL_FAIL_ROWS, RuleType.CUSTOM_SQL_CONNECTION}:
@@ -3745,6 +3761,9 @@ class DQToolWebApp:
 
     def _notify_run_outcome(self, rule: Rule, run: RuleRun) -> None:
         summary = run.summary_json
+        if rule.rule_type == RuleType.DATA_FRESHNESS and run.status in {"passed", "failed"}:
+            ui.notify(self._freshness_run_message(rule, run), type="positive" if run.status == "passed" else "warning")
+            return
         if run.status == "passed":
             failed_count = int(summary.get("failed_count") or 0)
             threshold_allowed = summary.get("fail_threshold_allowed")
@@ -3765,6 +3784,25 @@ class DQToolWebApp:
         else:
             ui.notify(f"Rule '{rule.name}' errored: {summary.get('error', 'Execution failed.')}", type="negative")
 
+    @staticmethod
+    def _freshness_run_message(rule: Rule, run: RuleRun) -> str:
+        """Describe a freshness result as a source-level condition, not a row failure."""
+        summary = run.summary_json
+        field = str(rule.config.get("column") or "selected field")
+        maximum_age = summary.get("max_age_days", rule.config.get("max_age_days", "n/a"))
+        maximum_age_label = "day" if maximum_age == 1 else "days"
+        latest_value = summary.get("latest_value")
+        age_days = summary.get("freshness_age_days")
+        if latest_value is None:
+            condition = "the source is empty or contains no readable date"
+        else:
+            condition = (
+                f"the newest '{field}' value is {latest_value} "
+                f"({age_days} days old; maximum allowed age is {maximum_age} {maximum_age_label})"
+            )
+        outcome = "passed" if run.status == "passed" else "failed"
+        return f"Data freshness rule '{rule.name}' {outcome}: {condition}."
+
     def view_selected_result(self) -> None:
         run = self._selected_result()
         if run is None or not self.project:
@@ -3776,13 +3814,28 @@ class DQToolWebApp:
             f"**Rule:** {rules.get(run.rule_id, f'Rule #{run.rule_id}')}",
             f"**Source:** {summary.get('source_label', f'Source for rule #{run.rule_id}')}",
             f"**Status:** {run.status.upper()}",
-            f"**Checked rows:** {summary.get('checked_count', 'n/a')}",
-            f"**Failed rows:** {summary.get('failed_count', 'n/a')}",
             f"**Started:** {self._format_timestamp(run.started_at)}",
             f"**Finished:** {self._format_timestamp(run.finished_at)}",
             f"**Runtime:** {self._format_runtime(run.runtime_ms)}",
             f"**Executed by:** {run.executed_by}",
         ]
+        if summary.get("rule_type") == RuleType.DATA_FRESHNESS.value:
+            lines.extend(
+                [
+                    f"**Source rows inspected:** {summary.get('checked_count', 'n/a')}",
+                    f"**Freshness result:** {summary.get('freshness_message', 'n/a')}",
+                    f"**Newest selected value:** {summary.get('latest_value', 'n/a')}",
+                    f"**Age (days):** {summary.get('freshness_age_days', 'n/a')}",
+                    f"**Maximum age (days):** {summary.get('max_age_days', 'n/a')}",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    f"**Checked rows:** {summary.get('checked_count', 'n/a')}",
+                    f"**Failed rows:** {summary.get('failed_count', 'n/a')}",
+                ]
+            )
         if summary.get("error"):
             lines.append(f"**Error:** {summary['error']}")
         if run.failed_rows_path:
@@ -4185,8 +4238,13 @@ class DQToolWebApp:
         )
 
     def _update_results_outcome_chart(self, runs: list[RuleRun]) -> None:
+        selected_rule_id = self._selected_result_rule_id()
+        if selected_rule_id is None:
+            self._set_chart_options(self.results_outcome_chart, self._empty_chart_options("Select a rule"))
+            return
+        runs = filter_runs_for_rule(runs, selected_rule_id)
         if not runs:
-            self._set_chart_options(self.results_outcome_chart, self._empty_chart_options("No runs yet"))
+            self._set_chart_options(self.results_outcome_chart, self._empty_chart_options("No runs yet for this rule"))
             return
         per_day: dict[str, dict[str, int]] = {}
         for run in runs:
@@ -4639,7 +4697,9 @@ class DQToolWebApp:
         self._results_all_rows = rows
         self._set_select_options(self.result_rule_select, options, self.selected_result_rule_id)
         self._refresh_results_view()
+        self._populate_result_runs()
         self._update_results_outcome_chart(runs)
+        self._update_result_trend_chart()
 
     def _selected_result_rule_id(self) -> int | None:
         selected = self.result_rule_select.value if self.project else None
@@ -5220,12 +5280,14 @@ class DQToolWebApp:
         self.result_rule_select.update()
         self._highlight_results_row()
         self._populate_result_runs()
+        self._update_results_outcome_chart(self.project.storage.list_rule_runs() if self.project else [])
         self._update_result_trend_chart()
 
     def _on_result_item_select_change(self, event: Any) -> None:
         self.selected_result_rule_id = event.value
         self._highlight_results_row()
         self._populate_result_runs()
+        self._update_results_outcome_chart(self.project.storage.list_rule_runs() if self.project else [])
         self._update_result_trend_chart()
 
     def _refresh_results_view(self) -> None:

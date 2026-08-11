@@ -18,6 +18,8 @@ class ExecutionServiceTests(unittest.TestCase):
         self.results_dir.mkdir(exist_ok=True)
         self.non_utf8_csv_path = self.root / ".runtime-latin1.csv"
         self.non_utf8_csv_path.write_bytes(b"id;name\n1;VARKENSKROON +/- 2,25KG\n2;caf\xe9\n")
+        self.freshness_csv_path = self.root / ".runtime-freshness.csv"
+        self.freshness_csv_path.write_text("id,loaded_at\n1,2020-01-01\n", encoding="utf-8")
         self.csv_connection = Connection(
             id=11,
             name="fixture-csv",
@@ -47,6 +49,7 @@ class ExecutionServiceTests(unittest.TestCase):
             result.unlink()
         self.results_dir.rmdir()
         self.non_utf8_csv_path.unlink(missing_ok=True)
+        self.freshness_csv_path.unlink(missing_ok=True)
 
     def test_csv_rule_runs_without_dataframe_dependencies(self) -> None:
         rule = Rule(
@@ -116,6 +119,51 @@ class ExecutionServiceTests(unittest.TestCase):
         self.assertEqual(1, summary["failed_count"])
         self.assertEqual(1, len(failed_rows))
         self.assertIn("too old", failed_rows[0]["finding"])
+
+    def test_embedded_csv_data_freshness_rule_executes(self) -> None:
+        rule = Rule(
+            id=1,
+            name="fresh customers",
+            rule_type=RuleType.DATA_FRESHNESS,
+            dataset_id=None,
+            owner_username="tester",
+            config={
+                "source_connection_id": 12,
+                "source_kind": "csv_file",
+                "source_name": self.freshness_csv_path.name,
+                "source_sql": "",
+                "column": "loaded_at",
+                "max_age_days": 1,
+            },
+        )
+
+        run = self.service.run_rules([rule], {}, {12: self.latin1_connection}, self.results_dir, "tester")[0]
+
+        self.assertEqual("failed", run.status)
+        self.assertEqual(1, run.summary_json["failed_count"])
+        self.assertEqual("2020-01-01T00:00:00+00:00", run.summary_json["latest_value"])
+
+    def test_date_validity_rule_can_enforce_an_earliest_date(self) -> None:
+        rule = Rule(
+            id=1,
+            name="recent subscriptions",
+            rule_type=RuleType.DATE_VALIDITY,
+            dataset_id=None,
+            owner_username="tester",
+            config={
+                "source_connection_id": 12,
+                "source_kind": "csv_file",
+                "source_name": self.freshness_csv_path.name,
+                "source_sql": "",
+                "column": "loaded_at",
+                "min_date": "2022-01-01",
+            },
+        )
+
+        run = self.service.run_rules([rule], {}, {12: self.latin1_connection}, self.results_dir, "tester")[0]
+
+        self.assertEqual("failed", run.status)
+        self.assertEqual(1, run.summary_json["failed_count"])
 
     def test_failed_rows_append_to_one_file_per_rule_with_execution_datetime(self) -> None:
         import csv

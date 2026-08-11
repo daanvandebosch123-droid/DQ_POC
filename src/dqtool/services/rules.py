@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 from dqtool.models.entities import Rule, RuleGroup, RuleType
 
 RULE_TEMPLATES: dict[RuleType, dict[str, str]] = {
@@ -44,9 +46,9 @@ RULE_TEMPLATES: dict[RuleType, dict[str, str]] = {
         "setup": "Choose a field and enter accepted values separated by commas, such as ACTIVE, INACTIVE. Matching is exact and null values are ignored.",
     },
     RuleType.DATE_VALIDITY: {
-        "name": "Date Validity Check",
-        "description": "Fails values that cannot be converted into a valid date; null values also fail this check.",
-        "setup": "Choose the field that should contain dates. Use a custom SQL rule when a specific date format or minimum/maximum date must be enforced.",
+        "name": "Date Validity & Range Check",
+        "description": "Fails values that cannot be converted into a valid date, are null, or fall outside optional earliest/latest date bounds.",
+        "setup": "Choose the field that should contain dates. Optionally enter an earliest and/or latest accepted date in YYYY-MM-DD format.",
     },
     RuleType.DATA_FRESHNESS: {
         "name": "Data Freshness",
@@ -90,7 +92,7 @@ RULE_CONFIG_EXAMPLES: dict[RuleType, dict] = {
     RuleType.REGEX: {"column": "email", "pattern": "^[^@]+@[^@]+$"},
     RuleType.LENGTH: {"column": "code", "min_length": 1, "max_length": 20},
     RuleType.ALLOWED_VALUES: {"column": "status", "values": ["ACTIVE", "INACTIVE"]},
-    RuleType.DATE_VALIDITY: {"column": "invoice_date"},
+    RuleType.DATE_VALIDITY: {"column": "invoice_date", "min_date": "", "max_date": ""},
     RuleType.DATA_FRESHNESS: {"column": "loaded_at", "max_age_days": 1},
     RuleType.CUSTOM_SQL_FAIL_ROWS: {"sql": "SELECT * FROM dataset_view WHERE ..."},
     RuleType.CUSTOM_SQL_THRESHOLD: {
@@ -173,6 +175,18 @@ def validate_rule_config(rule_type: RuleType, config: dict, *, require_source: b
                 errors.append("Maximum age (days) cannot be negative.")
         except (TypeError, ValueError):
             errors.append("Maximum age (days) must be a whole number.")
+    if rule_type == RuleType.DATE_VALIDITY:
+        bounds: dict[str, date] = {}
+        for key, label in (("min_date", "Earliest allowed date"), ("max_date", "Latest allowed date")):
+            value = normalized.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                bounds[key] = date.fromisoformat(str(value).strip())
+            except (TypeError, ValueError):
+                errors.append(f"{label} must use YYYY-MM-DD format.")
+        if bounds.get("min_date") and bounds.get("max_date") and bounds["min_date"] > bounds["max_date"]:
+            errors.append("Earliest allowed date cannot be after the latest allowed date.")
     errors.extend(_validate_fail_threshold(normalized))
     return list(dict.fromkeys(errors))
 

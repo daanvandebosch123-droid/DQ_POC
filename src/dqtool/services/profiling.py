@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import date, datetime
 from typing import Any
 
 import duckdb
@@ -9,7 +10,6 @@ import duckdb
 from dqtool.models.entities import Connection, ConnectionType, RuleType, utc_now
 from dqtool.services.connectors import ConnectorService
 
-MAX_PROFILED_COLUMNS = 50
 PROFILE_AGGREGATE_BATCH_SIZE = 8
 
 ROW_COUNT_HIGH = 0.30
@@ -22,6 +22,8 @@ MEAN_SHIFT_STDDEVS = 3.0
 DOMINANT_SHARE = 0.8
 MAX_EXAMPLE_VALUES = 5
 MAX_SUGGESTED_VALUES = 10
+MAX_FREQUENCY_VALUES = 10
+FREQUENCY_DISTINCT_LIMIT = 100
 OUTLIER_FENCE_MULTIPLIER = 1.5
 EMAIL_LOOSE_PATTERN = "^[^@\\s]+@[^@\\s]+$"
 EMAIL_STRICT_PATTERN = "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
@@ -85,7 +87,7 @@ class ProfilingService:
             total_column_count = len(summary)
             columns: dict[str, dict[str, Any]] = {}
             numeric_quartiles: list[tuple[str, float, float]] = []
-            for row in summary[:MAX_PROFILED_COLUMNS]:
+            for row in summary:
                 name = row[index["column_name"]]
                 null_percentage = row[index["null_percentage"]]
                 columns[name] = {
@@ -113,6 +115,7 @@ class ProfilingService:
                     distinct = next(values)
                     columns[name]["distinct_count"] = int(distinct or 0)
             findings = self._content_findings_duckdb(con, columns, numeric_quartiles, int(row_count))
+            self._add_duckdb_frequency_analysis(con, columns, int(row_count), findings)
             privacy_findings = gdpr_risk_findings(columns)
             privacy_findings.extend(self._privacy_value_findings_duckdb(con, columns))
             return {
@@ -120,12 +123,29 @@ class ProfilingService:
                 "row_count": int(row_count),
                 "columns": columns,
                 "total_column_count": total_column_count,
-                "profile_limit_reached": total_column_count > MAX_PROFILED_COLUMNS,
+                "profile_limit_reached": False,
                 "content_findings": findings,
                 "gdpr_findings": _deduplicate_gdpr_findings(privacy_findings),
             }
         finally:
             con.close()
+
+    def _add_duckdb_frequency_analysis(
+        self, con: duckdb.DuckDBPyConnection, columns: dict[str, dict[str, Any]], row_count: int, findings: list[dict[str, Any]]
+    ) -> None:
+        for name, stats in columns.items():
+            if not str(stats.get("type") or "").upper().startswith("VARCHAR"):
+                continue
+            if not 0 < int(stats.get("distinct_count") or 0) <= FREQUENCY_DISTINCT_LIMIT:
+                continue
+            quoted = '"' + name.replace('"', '""') + '"'
+            rows = con.execute(
+                f"SELECT NULLIF(trim({quoted}), '') AS value, COUNT(*) AS count FROM profile_view "
+                f"GROUP BY NULLIF(trim({quoted}), '') ORDER BY count DESC, value LIMIT {FREQUENCY_DISTINCT_LIMIT}"
+            ).fetchall()
+            stats["frequency_values"] = _frequency_rows(rows, row_count)
+            stats["top_values"] = stats["frequency_values"][:MAX_FREQUENCY_VALUES]
+            findings.extend(_placeholder_findings(name, stats["top_values"]))
 
     def _content_findings_duckdb(
         self,
@@ -140,9 +160,10 @@ class ProfilingService:
             if not str(stats.get("type", "")).upper().startswith("VARCHAR"):
                 continue
             quoted = '"' + name.replace('"', '""') + '"'
-            non_null, blank_count, numeric, email_loose, email_strict, date_like = con.execute(
+            non_null, blank_count, text_min, text_max, numeric, email_loose, email_strict, date_like = con.execute(
                 f"SELECT COUNT({quoted}), "
                 f"COUNT(*) FILTER (WHERE {quoted} IS NOT NULL AND trim({quoted}) = ''), "
+                f"MIN(NULLIF(trim({quoted}), '')), MAX(NULLIF(trim({quoted}), '')), "
                 f"COUNT(*) FILTER (WHERE try_cast({quoted} AS DOUBLE) IS NOT NULL), "
                 f"COUNT(*) FILTER (WHERE regexp_matches({quoted}, '{EMAIL_LOOSE_PATTERN}')), "
                 f"COUNT(*) FILTER (WHERE regexp_matches({quoted}, '{EMAIL_STRICT_PATTERN}')), "
@@ -153,6 +174,8 @@ class ProfilingService:
                 continue
             stats["blank_count"] = int(blank_count or 0)
             stats["blank_rate"] = round(int(blank_count or 0) / row_count, 6) if row_count else 0.0
+            stats["min"] = self._json_safe(text_min)
+            stats["max"] = self._json_safe(text_max)
             numeric_share = numeric / non_null
             email_share = email_loose / non_null
             date_share = date_like / non_null
@@ -291,7 +314,7 @@ class ProfilingService:
             with db_conn.cursor() as cursor:
                 cursor.execute(self.connector_service.describe_sql(sql))
                 all_described = cursor.description
-                described = all_described[:MAX_PROFILED_COLUMNS]
+                described = all_described
                 numeric_names = {
                     item[0]
                     for item in described
@@ -323,7 +346,13 @@ class ProfilingService:
                     elif item[0] in date_names:
                         aggregates.extend((f"MIN({quoted})", f"MAX({quoted})"))
                     elif item[0] in text_names:
-                        aggregates.append(f"COUNT(CASE WHEN {quoted} IS NOT NULL AND TRIM({quoted}) = '' THEN 1 END)")
+                        aggregates.extend(
+                            (
+                                f"MIN(NULLIF(TRIM({quoted}), ''))",
+                                f"MAX(NULLIF(TRIM({quoted}), ''))",
+                                f"COUNT(CASE WHEN {quoted} IS NOT NULL AND TRIM({quoted}) = '' THEN 1 END)",
+                            )
+                        )
                 cursor.execute(f"SELECT {', '.join(aggregates)} FROM ({sql}) q")
                 values = list(cursor.fetchone())
                 for item in batch:
@@ -351,26 +380,108 @@ class ProfilingService:
                         stats["min"] = self._json_safe(values.pop(0))
                         stats["max"] = self._json_safe(values.pop(0))
                     elif item[0] in text_names:
+                        stats["min"] = self._json_safe(values.pop(0))
+                        stats["max"] = self._json_safe(values.pop(0))
                         blank_count = int(values.pop(0) or 0)
                         stats["blank_count"] = blank_count
                         stats["blank_rate"] = round(blank_count / row_count, 6) if row_count else 0.0
                     columns[item[0]] = stats
+            self._infer_database_text_stats(cursor, sql, text_names, columns)
             content_findings = [
                 _finding("medium", name, f"{stats['blank_count']} value(s) are blank or contain spaces only.")
                 for name, stats in columns.items()
                 if stats.get("blank_count")
             ]
+            self._add_database_frequency_analysis(cursor, sql, connection, text_names, columns, row_count, content_findings)
             return {
                 "profiled_at": utc_now(),
                 "row_count": row_count,
                 "columns": columns,
                 "total_column_count": len(all_described),
-                "profile_limit_reached": len(all_described) > MAX_PROFILED_COLUMNS,
+                "profile_limit_reached": False,
                 "content_findings": content_findings,
                 "gdpr_findings": gdpr_risk_findings(columns),
             }
         finally:
             db_conn.close()
+
+    def _add_database_frequency_analysis(
+        self, cursor: Any, sql: str, connection: Connection, text_names: set[str], columns: dict[str, dict[str, Any]],
+        row_count: int, findings: list[dict[str, Any]],
+    ) -> None:
+        dialect = self.connector_service.database_dialect(connection)
+        for name in sorted(text_names):
+            stats = columns[name]
+            if not 0 < int(stats.get("distinct_count") or 0) <= FREQUENCY_DISTINCT_LIMIT:
+                continue
+            quoted = '"' + name.replace('"', '""') + '"'
+            value = f"NULLIF(TRIM(q.{quoted}), '')"
+            frequency_sql = (
+                f"SELECT {value} AS value, COUNT(*) AS count FROM ({sql}) q GROUP BY {value} "
+                f"ORDER BY COUNT(*) DESC, {value}"
+            )
+            cursor.execute(self.connector_service.limited_sql(frequency_sql, FREQUENCY_DISTINCT_LIMIT, dialect))
+            stats["frequency_values"] = _frequency_rows(cursor.fetchall(), row_count)
+            stats["top_values"] = stats["frequency_values"][:MAX_FREQUENCY_VALUES]
+            findings.extend(_placeholder_findings(name, stats["top_values"]))
+
+    def _infer_database_text_stats(
+        self, cursor: Any, sql: str, text_names: set[str], columns: dict[str, dict[str, Any]]
+    ) -> None:
+        """Infer numeric and date-like text without relying on vendor-specific safe casts."""
+        if not text_names:
+            return
+        names = sorted(text_names)
+        quoted_names = ['"' + name.replace('"', '""') + '"' for name in names]
+        cursor.execute(f"SELECT {', '.join(quoted_names)} FROM ({sql}) q")
+        numeric: dict[str, list[float]] = {name: [] for name in names}
+        dates: dict[str, list[date]] = {name: [] for name in names}
+        while rows := cursor.fetchmany(1000):
+            for row in rows:
+                for name, value in zip(names, row, strict=True):
+                    if value is None:
+                        continue
+                    text = str(value).strip()
+                    if not text:
+                        continue
+                    number = self._numeric_text_value(text)
+                    if number is not None:
+                        numeric[name].append(number)
+                    parsed_date = self._date_text_value(text)
+                    if parsed_date is not None:
+                        dates[name].append(parsed_date)
+        for name in names:
+            stats = columns[name]
+            non_null = int(stats.get("non_null_count") or 0)
+            if not non_null:
+                continue
+            if len(dates[name]) / non_null >= DOMINANT_SHARE:
+                values = dates[name]
+                stats["inferred_type"] = "date/time"
+                stats["min"] = min(values).isoformat()
+                stats["max"] = max(values).isoformat()
+            elif len(numeric[name]) / non_null >= DOMINANT_SHARE:
+                values = numeric[name]
+                stats["inferred_type"] = "numeric text"
+                stats["min"] = min(values)
+                stats["max"] = max(values)
+                stats["mean"] = sum(values) / len(values)
+
+    @staticmethod
+    def _numeric_text_value(value: str) -> float | None:
+        try:
+            return float(value) if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", value) else None
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _date_text_value(value: str) -> date | None:
+        for pattern in ("%Y-%m-%d", "%Y%m%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(value, pattern).date()
+            except ValueError:
+                continue
+        return None
 
     def _json_safe(self, value: Any) -> Any:
         if value is None or isinstance(value, (int, float, str, bool)):
@@ -477,6 +588,29 @@ def gdpr_risk_findings(columns: dict[str, dict[str, Any]]) -> list[dict[str, Any
 
 def _gdpr_finding(severity: str, column: str, category: str, reason: str) -> dict[str, Any]:
     return {"severity": severity, "column": column, "category": category, "reason": reason}
+
+
+def _frequency_rows(rows: list[tuple[Any, Any]], row_count: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "value": "(blank)" if value is None else str(value),
+            "count": int(count or 0),
+            "share": round(int(count or 0) / row_count, 6) if row_count else 0.0,
+        }
+        for value, count in rows
+    ]
+
+
+def _placeholder_findings(column: str, frequencies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    findings = []
+    for item in frequencies:
+        value = str(item["value"])
+        normalized = value.strip().upper()
+        if normalized in {"***", "N/A", "NA", "NONE", "NULL", "UNKNOWN", "UNSPECIFIED", "-"} or re.search(r"\*{2,}", normalized):
+            findings.append(
+                _finding("medium", column, f"Placeholder value '{value}' occurs {int(item['count']):,} time(s) ({float(item['share']):.1%}).")
+            )
+    return findings
 
 
 def _deduplicate_gdpr_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:

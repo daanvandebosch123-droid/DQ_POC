@@ -9,6 +9,7 @@ from dqtool.models.entities import Connection, ConnectionType
 from dqtool.services.connectors import ConnectorService
 from dqtool.services.profiling import (
     ProfilingService,
+    _placeholder_findings,
     detect_anomalies,
     gdpr_risk_findings,
     profile_rule_suggestions,
@@ -50,7 +51,14 @@ class ProfilingServiceTests(unittest.TestCase):
         self.assertEqual(3, id_stats["non_null_count"])
         self.assertEqual(2, profile["total_column_count"])
         self.assertFalse(profile["profile_limit_reached"])
+        self.assertEqual("Alice", profile["columns"]["name"]["top_values"][0]["value"])
         self.assertTrue(profile["profiled_at"])
+
+    def test_placeholder_detection_flags_masked_values(self) -> None:
+        findings = _placeholder_findings("status", [{"value": "***", "count": 9, "share": 0.9}])
+
+        self.assertEqual("status", findings[0]["column"])
+        self.assertIn("Placeholder value '***' occurs 9 time(s) (90.0%)", findings[0]["message"])
 
     def test_sqlserver_profile_uses_stdev_and_profiles_date_ranges(self) -> None:
         connection = Connection(
@@ -98,7 +106,8 @@ class ProfilingServiceTests(unittest.TestCase):
         )
         cursor = MagicMock()
         cursor.description = [("code", str)]
-        cursor.fetchone.side_effect = [(3,), (3, 2, 1)]
+        cursor.fetchone.side_effect = [(3,), (3, 3, "0", "2", 1)]
+        cursor.fetchmany.side_effect = [[("0",), ("1",), ("2",)], []]
         db_connection = MagicMock()
         db_connection.cursor.return_value.__enter__.return_value = cursor
         config = {"source_connection_id": 23, "source_kind": "oracle_table", "source_name": "orders", "source_sql": ""}
@@ -109,6 +118,45 @@ class ProfilingServiceTests(unittest.TestCase):
         self.assertIn('TRIM("code") = \'\'', cursor.execute.call_args_list[2].args[0])
         self.assertEqual(1, profile["columns"]["code"]["blank_count"])
         self.assertAlmostEqual(1 / 3, profile["columns"]["code"]["blank_rate"], places=5)
+        self.assertEqual("numeric text", profile["columns"]["code"]["inferred_type"])
+        self.assertEqual(0.0, profile["columns"]["code"]["min"])
+        self.assertEqual(2.0, profile["columns"]["code"]["max"])
+        self.assertEqual(1.0, profile["columns"]["code"]["mean"])
+
+    def test_database_text_date_is_inferred_before_numeric_text(self) -> None:
+        connection = Connection(id=24, name="db2", connection_type=ConnectionType.DB2, owner_username="tester")
+        cursor = MagicMock()
+        cursor.description = [("loaded_at", str)]
+        cursor.fetchone.side_effect = [(2,), (2, 2, "20260101", "20260201", 0)]
+        cursor.fetchmany.side_effect = [[("20260101",), ("20260201",)], []]
+        db_connection = MagicMock()
+        db_connection.cursor.return_value.__enter__.return_value = cursor
+        config = {"source_connection_id": 24, "source_kind": "oracle_table", "source_name": "orders", "source_sql": ""}
+
+        with patch.object(self.service.connector_service, "connect_database", return_value=db_connection):
+            profile = self.service.profile_rule_source(config, {24: connection})
+
+        self.assertEqual("date/time", profile["columns"]["loaded_at"]["inferred_type"])
+        self.assertEqual("2026-01-01", profile["columns"]["loaded_at"]["min"])
+        self.assertEqual("2026-02-01", profile["columns"]["loaded_at"]["max"])
+
+    def test_database_text_min_max_exclude_blank_values(self) -> None:
+        connection = Connection(id=25, name="db2", connection_type=ConnectionType.DB2, owner_username="tester")
+        cursor = MagicMock()
+        cursor.description = [("label", str)]
+        cursor.fetchone.side_effect = [(3,), (3, 2, "A", "Z", 1)]
+        cursor.fetchmany.side_effect = [[(" ",), ("A",), ("Z",)], []]
+        db_connection = MagicMock()
+        db_connection.cursor.return_value.__enter__.return_value = cursor
+        config = {"source_connection_id": 25, "source_kind": "oracle_table", "source_name": "orders", "source_sql": ""}
+
+        with patch.object(self.service.connector_service, "connect_database", return_value=db_connection):
+            profile = self.service.profile_rule_source(config, {25: connection})
+
+        aggregate_sql = cursor.execute.call_args_list[2].args[0]
+        self.assertIn("MIN(NULLIF(TRIM(\"label\"), ''))", aggregate_sql)
+        self.assertEqual("A", profile["columns"]["label"]["min"])
+        self.assertEqual("Z", profile["columns"]["label"]["max"])
 
     def test_distinct_counts_never_exceed_row_count(self) -> None:
         # SUMMARIZE's approx_unique overshoots (e.g. 11,693 distinct in a 10,000-row file);

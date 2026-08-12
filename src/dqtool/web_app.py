@@ -32,6 +32,7 @@ from dqtool.models.entities import (
     utc_now,
 )
 from dqtool.services.ai import DEFAULT_ENDPOINT, DEFAULT_MODEL, OllamaService
+from dqtool.services.anomaly_export import build_anomaly_report_workbook
 from dqtool.services.connectors import ODBC_SETTINGS, ConnectorService
 from dqtool.services.execution import ExecutionService
 from dqtool.services.profiling import ProfilingService, detect_anomalies, profile_rule_suggestions, source_profile_key
@@ -130,6 +131,14 @@ def missing_or_blank_percent(stats: dict[str, Any]) -> float:
     """Combine separate SQL-null and blank rates for the completeness chart."""
     return round((float(stats.get("null_rate") or 0) + float(stats.get("blank_rate") or 0)) * 100, 1)
 
+
+def format_profile_mean(value: Any) -> str:
+    """Display profile means as regular decimal numbers instead of scientific notation."""
+    try:
+        return f"{float(value):,.6f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return ""
+
 # Shared Quasar cell templates -------------------------------------------------
 
 # Tree Name cell used by the Rules and Results overview tables: CSS indentation by depth,
@@ -193,6 +202,54 @@ STATUS_BADGE_CELL_TEMPLATE = r"""
             text-color="white"
             :label="props.row.last_status"
         />
+        <span v-else>-</span>
+    </q-td>
+"""
+
+PROFILE_FREQUENCY_CELL_TEMPLATE = r"""
+    <q-td key="frequency" :props="props">
+        <q-btn
+            v-if="props.row.frequency && props.row.frequency.length"
+            dense outline no-caps color="primary" size="sm"
+            icon="format_list_bulleted"
+            :label="'Top ' + props.row.frequency.length"
+        >
+            <q-tooltip>Show the most frequent values</q-tooltip>
+            <q-menu anchor="bottom left" self="top left">
+                <q-card style="min-width: 300px; max-width: 380px">
+                    <q-card-section class="q-pb-sm">
+                        <div class="text-subtitle2">Most frequent values</div>
+                        <div class="text-caption text-grey-7">{{ props.row.field }}</div>
+                    </q-card-section>
+                    <q-separator />
+                    <q-list dense class="q-py-sm">
+                        <q-item v-for="item in props.row.frequency" :key="item.value + item.count">
+                            <q-item-section>
+                                <q-item-label class="ellipsis" :title="item.value">{{ item.value }}</q-item-label>
+                                <q-linear-progress
+                                    rounded size="5px" color="primary" track-color="grey-3"
+                                    :value="item.share_value"
+                                    class="q-mt-xs"
+                                />
+                            </q-item-section>
+                            <q-item-section side class="items-end">
+                                <q-item-label class="text-body2">{{ item.count }}</q-item-label>
+                                <q-item-label caption>{{ item.share }}</q-item-label>
+                            </q-item-section>
+                        </q-item>
+                    </q-list>
+                    <q-separator />
+                    <q-card-actions align="right">
+                        <q-btn
+                            flat no-caps color="primary" icon="open_in_new"
+                            :label="'View all ' + props.row.frequency_all.length + ' values'"
+                            v-close-popup
+                            @click="$parent.$emit('view_all_frequency', props.row)"
+                        />
+                    </q-card-actions>
+                </q-card>
+            </q-menu>
+        </q-btn>
         <span v-else>-</span>
     </q-td>
 """
@@ -270,7 +327,6 @@ class DQToolWebApp:
         self.runtime_trend_chart: ui.echart
         self.results_outcome_chart: ui.echart
         self.results_trend_chart: ui.echart
-        self.anomaly_nulls_chart: ui.echart
         self.anomaly_rowcount_chart: ui.echart
 
         self.rules_count: ui.label
@@ -1031,11 +1087,14 @@ class DQToolWebApp:
                             options={}, label="Connection", on_change=self._load_anomaly_targets
                         ).props("outlined dense").classes("grow min-w-[190px] max-w-[280px]")
                         self.anomaly_target_select = ui.select(
-                            options=[], label="File / table", with_input=True, on_change=self._load_anomaly_history
+                            options=[], label="File / table", with_input=True, on_change=self._on_anomaly_target_changed
                         ).props("outlined dense").classes("grow min-w-[190px] max-w-[320px]")
                         ui.button("Run anomaly check", icon="troubleshoot", on_click=self.run_anomaly_check).props(
                             "color=primary unelevated no-caps"
                         )
+                        ui.button("Export to Excel", icon="download", on_click=self.export_anomaly_report).props(
+                            "outline no-caps"
+                        ).tooltip("Exports the current anomaly check without source rows")
                         ui.button("Explain with AI", icon="psychology", on_click=self.explain_selected_anomalies).props(
                             "outline no-caps"
                         ).tooltip("Uses the configured Ollama endpoint - review your AI settings before sharing sensitive sources")
@@ -1055,26 +1114,21 @@ class DQToolWebApp:
                     ["Checked", "Row count", "Findings", "High severity", "GDPR flags"], pagination=8
                 )
                 self.anomaly_history_table.on("rowClick", self._view_anomaly_history_row)
-            with ui.row().classes("w-full items-stretch gap-4"):
-                with ui.card().classes("dq-soft-card w-full lg:w-[calc(50%-8px)] p-6"):
-                    ui.label("COMPLETENESS").classes("dq-eyebrow")
-                    ui.label("Missing or blank rate by column").classes("dq-panel-title text-xl font-bold")
-                    self.anomaly_nulls_chart = ui.echart(
-                        self._empty_chart_options("Run an anomaly check to see charts")
-                    ).classes("w-full h-[260px]")
-                with ui.card().classes("dq-soft-card w-full lg:w-[calc(50%-8px)] p-6"):
-                    ui.label("VOLUME").classes("dq-eyebrow")
-                    ui.label("Row count across snapshots").classes("dq-panel-title text-xl font-bold")
-                    self.anomaly_rowcount_chart = ui.echart(
-                        self._empty_chart_options("Run an anomaly check to see charts")
-                    ).classes("w-full h-[260px]")
-            with ui.row().classes("w-full items-stretch gap-4"):
-                with ui.card().classes("dq-soft-card w-full lg:w-[calc(50%-8px)] p-6"):
-                    ui.label("Drift findings").classes("dq-panel-title text-xl font-bold")
-                    self.anomaly_table = self._build_table(["Severity", "Column", "Finding"], pagination=8)
-                with ui.card().classes("dq-soft-card w-full lg:w-[calc(50%-8px)] p-6"):
-                    ui.label("Column profile").classes("dq-panel-title text-xl font-bold")
-                    self.profile_table = ui.table(
+            with ui.card().classes("dq-soft-card w-full p-6"):
+                ui.label("VOLUME").classes("dq-eyebrow")
+                ui.label("Row count across snapshots").classes("dq-panel-title text-xl font-bold")
+                self.anomaly_rowcount_chart = ui.echart(
+                    self._empty_chart_options("Run an anomaly check to see charts")
+                ).classes("w-full h-[260px]")
+            with ui.card().classes("dq-soft-card w-full p-6"):
+                ui.label("Drift findings").classes("dq-panel-title text-xl font-bold")
+                self.anomaly_table = self._build_table(["Severity", "Column", "Finding"], pagination=8)
+            with ui.card().classes("dq-soft-card w-full p-6"):
+                ui.label("Column profile").classes("dq-panel-title text-xl font-bold")
+                ui.label("Open Top values to inspect the most common values for categorical and code-like fields.").classes(
+                    "dq-panel-copy text-sm"
+                )
+                self.profile_table = ui.table(
                         columns=[
                             {"name": "field", "label": "Field", "field": "field", "align": "left"},
                             {"name": "type", "label": "Type", "field": "type", "align": "left"},
@@ -1086,11 +1140,14 @@ class DQToolWebApp:
                             {"name": "min", "label": "Min", "field": "min", "align": "right"},
                             {"name": "max", "label": "Max", "field": "max", "align": "right"},
                             {"name": "mean", "label": "Mean", "field": "mean", "align": "right"},
+                            {"name": "frequency", "label": "Frequent values", "field": "frequency", "align": "left"},
                         ],
                         rows=[],
                         row_key="field",
                         pagination=8,
-                    ).props("flat bordered wrap-cells").classes("dq-table-wrap w-full mt-4")
+                ).props("flat bordered wrap-cells").classes("dq-table-wrap w-full mt-4")
+                self.profile_table.add_slot("body-cell-frequency", PROFILE_FREQUENCY_CELL_TEMPLATE)
+                self.profile_table.on("view_all_frequency", self._show_all_frequency_values)
             with ui.card().classes("dq-soft-card w-full p-6"):
                 with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
                     with ui.column().classes("gap-1"):
@@ -1167,6 +1224,19 @@ class DQToolWebApp:
         self._load_anomaly_history()
         self._set_last_action(f"Ran anomaly check for {target}")
 
+    def export_anomaly_report(self) -> None:
+        report = self._last_anomaly_report
+        if not report:
+            ui.notify("Run an anomaly check first.", type="warning")
+            return
+        source_label = str(report["source_label"])
+        filename_part = re.sub(r"[^A-Za-z0-9._-]+", "_", source_label).strip("._") or "source"
+        profiled_at = str(report["profile"].get("profiled_at") or "").replace(":", "-")
+        filename = f"anomaly-report-{filename_part}-{profiled_at[:19] or 'latest'}.xlsx"
+        content = build_anomaly_report_workbook(source_label, report["profile"], report["anomalies"])
+        ui.download(content, filename=filename, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self._set_last_action(f"Exported anomaly report for {source_label}")
+
     def _render_anomaly_report(
         self,
         source_config: dict[str, Any],
@@ -1209,7 +1279,24 @@ class DQToolWebApp:
                 ),
                 "min": "" if stats.get("min") is None else str(stats["min"]),
                 "max": "" if stats.get("max") is None else str(stats["max"]),
-                "mean": "" if stats.get("mean") is None else f"{stats['mean']:.4g}",
+                "mean": format_profile_mean(stats.get("mean")),
+                "frequency": [
+                    {
+                        "value": str(item.get("value", "")),
+                        "count": f"{int(item.get('count') or 0):,}",
+                        "share": f"{float(item.get('share') or 0):.1%}",
+                        "share_value": float(item.get("share") or 0),
+                    }
+                    for item in stats.get("top_values") or []
+                ],
+                "frequency_all": [
+                    {
+                        "value": str(item.get("value", "")),
+                        "count": f"{int(item.get('count') or 0):,}",
+                        "share": f"{float(item.get('share') or 0):.1%}",
+                    }
+                    for item in stats.get("frequency_values") or stats.get("top_values") or []
+                ],
             }
             for name, stats in profile.get("columns", {}).items()
         ]
@@ -1275,11 +1362,6 @@ class DQToolWebApp:
                 f"Found **{len(anomalies)}** finding(s) for **{source_label}** "
                 f"({high} high severity), including drift versus the snapshot from "
                 f"{self._format_timestamp(previous.get('profiled_at'))}."
-            )
-        if profile.get("profile_limit_reached"):
-            message += (
-                f"\n\n_Only the first {len(profile.get('columns') or {}):,} of "
-                f"{int(profile.get('total_column_count') or 0):,} columns were profiled._"
             )
         self.anomaly_summary.content = message
         self.anomaly_summary.update()
@@ -1362,6 +1444,33 @@ class DQToolWebApp:
         self._selected_profile_suggestion_id = None
         self._refresh_profile_suggestions()
 
+    def _show_all_frequency_values(self, event: Any) -> None:
+        """Show the complete low-cardinality frequency list for one profiled field."""
+        args = event.args
+        row = args[-1] if isinstance(args, (list, tuple)) and args else args
+        if not isinstance(row, dict):
+            return
+        values = row.get("frequency_all") or []
+        if not values:
+            return
+        with ui.dialog() as dialog, ui.card().classes("w-[620px] max-w-full"):
+            with ui.row().classes("w-full items-start justify-between gap-3"):
+                with ui.column().classes("gap-1"):
+                    ui.label("All frequent values").classes("dq-panel-title text-xl font-bold")
+                    ui.label(f"{row.get('field')} · {len(values)} distinct value(s)").classes("dq-panel-copy text-sm")
+                ui.button(icon="close", on_click=dialog.close).props("flat round dense")
+            ui.table(
+                columns=[
+                    {"name": "value", "label": "Value", "field": "value", "align": "left"},
+                    {"name": "count", "label": "Count", "field": "count", "align": "right"},
+                    {"name": "share", "label": "Share", "field": "share", "align": "right"},
+                ],
+                rows=values,
+                row_key="value",
+                pagination=15,
+            ).props("flat bordered wrap-cells").classes("w-full mt-4")
+        dialog.open()
+
     def _refresh_profile_suggestions(self) -> None:
         selected_field = str(self.profile_suggestion_field_select.value or "")
         self.profile_suggestions_table.rows = [
@@ -1440,6 +1549,41 @@ class DQToolWebApp:
 
     async def _load_anomaly_targets(self, _event: Any = None) -> None:
         await self._load_connection_targets(self.anomaly_connection_select, self.anomaly_target_select)
+        self._remember_anomaly_selection()
+        self._load_anomaly_history()
+
+    def _on_anomaly_target_changed(self, _event: Any = None) -> None:
+        self._remember_anomaly_selection()
+        self._load_anomaly_history()
+
+    def _remember_anomaly_selection(self) -> None:
+        """Keep this browser user's most recent anomaly source, without storing any credentials."""
+        if not self.current_project or not self.anomaly_connection_select.value or not self.anomaly_target_select.value:
+            return
+        nicegui_app.storage.user["recent_anomaly_selection"] = {
+            "project_id": self.current_project.id,
+            "connection_id": str(self.anomaly_connection_select.value),
+            "target": str(self.anomaly_target_select.value),
+        }
+
+    def _saved_anomaly_selection(self) -> dict[str, str] | None:
+        saved = nicegui_app.storage.user.get("recent_anomaly_selection")
+        if not isinstance(saved, dict) or not self.current_project:
+            return None
+        if saved.get("project_id") != self.current_project.id:
+            return None
+        connection_id = str(saved.get("connection_id") or "")
+        target = str(saved.get("target") or "")
+        return {"connection_id": connection_id, "target": target} if connection_id and target else None
+
+    async def _restore_anomaly_target(self, saved: dict[str, str]) -> None:
+        """Restore a saved table only after reloading the current connection's available targets."""
+        await self._load_connection_targets(self.anomaly_connection_select, self.anomaly_target_select)
+        if saved["target"] not in self.anomaly_target_select.options:
+            return
+        self.anomaly_target_select.value = saved["target"]
+        self.anomaly_target_select.update()
+        self._load_anomaly_history()
 
     async def _load_preview_targets(self, _event: Any = None) -> None:
         await self._load_connection_targets(self.preview_connection_select, self.preview_target_select)
@@ -4329,47 +4473,6 @@ class DQToolWebApp:
         )
 
     def _update_anomaly_charts(self, profile: dict[str, Any], source_key: str) -> None:
-        missing_rates = sorted(
-            (
-                (name, missing_or_blank_percent(stats))
-                for name, stats in profile.get("columns", {}).items()
-            ),
-            key=lambda item: item[1],
-        )
-        missing_rates = [item for item in missing_rates if item[1] > 0][-10:]
-        if not missing_rates:
-            self._set_chart_options(
-                self.anomaly_nulls_chart, self._empty_chart_options("No missing or blank values in this snapshot")
-            )
-        else:
-            self._set_chart_options(
-                self.anomaly_nulls_chart,
-                {
-                    "grid": {"left": 8, "right": 56, "top": 8, "bottom": 8, "containLabel": True},
-                    "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
-                    "xAxis": {
-                        "type": "value",
-                        "axisLabel": {"color": CHART_MUTED, "formatter": "{value}%"},
-                        "splitLine": {"lineStyle": {"color": CHART_GRID}},
-                    },
-                    "yAxis": {
-                        "type": "category",
-                        "data": [name for name, _ in missing_rates],
-                        "axisLabel": {"color": "#5c564d"},
-                        "axisLine": {"lineStyle": {"color": CHART_GRID}},
-                    },
-                    "series": [
-                        {
-                            "type": "bar",
-                            "name": "Missing or blank",
-                            "data": [rate for _, rate in missing_rates],
-                            "barMaxWidth": 18,
-                            "itemStyle": {"color": CHART_SERIES, "borderRadius": [0, 4, 4, 0]},
-                            "label": {"show": True, "position": "right", "color": CHART_INK, "formatter": "{c}%"},
-                        }
-                    ],
-                },
-            )
         history = self.project.storage.list_source_profiles(source_key) if self.project else []
         if not history:
             self._set_chart_options(self.anomaly_rowcount_chart, self._empty_chart_options("No snapshots yet"))
@@ -4441,13 +4544,18 @@ class DQToolWebApp:
             if item.id is not None
         }
         self._set_select_options(self.connection_select, options, self.selected_connection_id)
+        saved_anomaly_selection = self._saved_anomaly_selection()
         self._set_select_options(
-            self.anomaly_connection_select, options, self._id_to_str(self.anomaly_connection_select.value)
+            self.anomaly_connection_select,
+            options,
+            (saved_anomaly_selection or {}).get("connection_id") or self._id_to_str(self.anomaly_connection_select.value),
         )
         self._set_select_options(
             self.preview_connection_select, options, self._id_to_str(self.preview_connection_select.value)
         )
         self._highlight_table_row(self.connections_table, self.connection_select.value)
+        if saved_anomaly_selection and self.anomaly_connection_select.value:
+            ui.timer(0.1, lambda: self._restore_anomaly_target(saved_anomaly_selection), once=True)
 
     def _populate_rules_and_groups(self) -> None:
         """Build one tree: each root group, its subgroups and member rules indented below it,

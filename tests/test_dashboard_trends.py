@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from dqtool.models.entities import RuleRun
-from dqtool.web_app import dashboard_daily_metrics, filter_runs_for_rule, missing_or_blank_percent
+from dqtool.web_app import dashboard_daily_metrics, filter_runs_for_rule, format_profile_mean, missing_or_blank_percent
 
 
 def _run(
@@ -22,6 +22,10 @@ def _run(
 
 
 class DashboardTrendTests(unittest.TestCase):
+    def test_profile_mean_uses_regular_decimal_notation(self) -> None:
+        self.assertEqual("91,430", format_profile_mean(9.143e4))
+        self.assertEqual("0.125", format_profile_mean(0.125))
+
     def test_missing_or_blank_percent_combines_non_overlapping_rates(self) -> None:
         self.assertEqual(37.5, missing_or_blank_percent({"null_rate": 0.125, "blank_rate": 0.25}))
 

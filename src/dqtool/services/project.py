@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import secrets as secrets_module
 from pathlib import Path
 from typing import Any
@@ -27,10 +26,6 @@ class ProjectContext:
     @property
     def results_dir(self) -> Path:
         return self.project_dir / "results"
-
-    @property
-    def exports_dir(self) -> Path:
-        return self.project_dir / "exports"
 
     @property
     def uploads_dir(self) -> Path:
@@ -74,10 +69,6 @@ def get_or_create_storage_secret() -> str:
         settings["storage_secret"] = secret
         save_settings(settings)
     return secret
-
-
-def current_username() -> str:
-    return os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
 
 
 def load_secrets() -> dict[str, Any]:

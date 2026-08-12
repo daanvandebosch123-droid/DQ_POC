@@ -179,12 +179,6 @@ class WorkspaceStorage:
             row = conn.execute("SELECT * FROM projects WHERE id = ?", (cursor.lastrowid,)).fetchone()
         return self._row_to_project(row)
 
-    def unregister_project(self, project_id: int) -> None:
-        """Remove a project from the registry. The folder on disk is left untouched."""
-        with self._session() as conn:
-            conn.execute("DELETE FROM project_members WHERE project_id = ?", (project_id,))
-            conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-
     # -- memberships ---------------------------------------------------------
 
     def list_project_members(self, project_id: int) -> dict[str, Role]:

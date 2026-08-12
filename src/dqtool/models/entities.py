@@ -29,7 +29,6 @@ class ConnectionType(StrEnum):
 
 
 class DatasetType(StrEnum):
-    ORACLE_TABLE = "oracle_table"
     ORACLE_SQL = "oracle_sql"
     CSV_FILE = "csv_file"
     CSV_FOLDER_FILE = "csv_folder_file"

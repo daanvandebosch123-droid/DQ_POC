@@ -80,7 +80,6 @@ RUN_STATUS_STYLES = {
 }
 CONNECTION_TYPE_LABELS = {"csv": "CSV", "oracle": "Oracle", "sqlserver": "SQL Server", "db2": "DB2", "sybase": "Sybase"}
 
-CHART_INK = "#37332e"
 CHART_MUTED = "#837d74"
 CHART_GRID = "#e2ded7"
 CHART_SERIES = "#6f6960"
@@ -306,7 +305,6 @@ class DQToolWebApp:
         self._failed_rows_preview_total = 0
 
         self.project_select: ui.select
-        self.user_name_label: ui.label
         self.user_role_label: ui.label
         self.status_label: ui.label
         self.dashboard_markdown: ui.markdown
@@ -647,9 +645,7 @@ class DQToolWebApp:
                             ui.label("Your quality workspace").classes("dq-page-heading text-4xl font-bold tracking-tight text-[#37332e]")
                         with ui.row().classes("items-center gap-3"):
                             with ui.column().classes("hidden sm:flex gap-0 items-end"):
-                                self.user_name_label = ui.label(self.current_user or "Not signed in").classes(
-                                    "text-sm font-bold text-[#37332e]"
-                                )
+                                ui.label(self.current_user or "Not signed in").classes("text-sm font-bold text-[#37332e]")
                                 self.user_role_label = ui.label(self.workspace_role.value).classes("text-xs text-[#837d74]")
                             ui.button(icon="smart_toy", on_click=lambda: self.show_ai_settings_dialog()).props(
                                 "flat round color=primary"
@@ -5152,47 +5148,6 @@ class DQToolWebApp:
         if visibility == "shared":
             return True
         return self.current_user in allowed_users
-
-    def _load_rule_targets(self, select: ui.select, output: ui.markdown) -> None:
-        try:
-            connection_id = select.value
-            if not connection_id:
-                raise ValueError("Select a connection first.")
-            connection = next(item for item in self._visible_connections() if str(item.id) == str(connection_id))
-            targets = self.connector_service.list_connection_targets(connection)
-            output.content = "\n".join(f"- {target}" for target in targets[:100]) or "_No targets found._"
-            output.update()
-        except Exception as exc:
-            output.content = f"Could not load targets: {exc}"
-            output.update()
-
-    def _load_rule_columns(
-        self,
-        connection_select: ui.select,
-        kind_select: ui.select,
-        name_input: ui.input,
-        sql_input: ui.textarea,
-        output: ui.markdown,
-    ) -> None:
-        try:
-            if not self.project:
-                raise ValueError("Open a project first.")
-            connection_id = connection_select.value
-            if not connection_id:
-                raise ValueError("Select a connection first.")
-            config = {
-                "source_connection_id": int(connection_id),
-                "source_kind": kind_select.value,
-                "source_name": (name_input.value or "").strip(),
-                "source_sql": (sql_input.value or "").strip(),
-            }
-            connections = {item.id: item for item in self._visible_connections() if item.id is not None}
-            columns = self.connector_service.list_rule_source_columns(config, connections)
-            output.content = "\n".join(f"- {column}" for column in columns) or "_No columns found._"
-            output.update()
-        except Exception as exc:
-            output.content = f"Could not load columns: {exc}"
-            output.update()
 
     def _open_recent_project(self) -> None:
         recent_id = nicegui_app.storage.user.get("recent_project_id")

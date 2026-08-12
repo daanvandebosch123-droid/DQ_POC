@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import MagicMock, Mock, patch
 
 from dqtool.services import ai as ai_module
-from dqtool.services.ai import DRAFT_TIMEOUT_SECONDS, DEFAULT_ENDPOINT, DEFAULT_MODEL, EMAIL_PATTERN, OllamaService
+from dqtool.services.ai import DEFAULT_ENDPOINT, DEFAULT_MODEL, DRAFT_TIMEOUT_SECONDS, EMAIL_PATTERN, OllamaService
 
 
 class OllamaRecommendationTests(unittest.TestCase):

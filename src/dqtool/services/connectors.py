@@ -58,35 +58,11 @@ class ConnectorService:
     def __init__(self) -> None:
         self._encoding_cache: dict[tuple[str, int, int], str] = {}
 
-    def preview_dataset(self, dataset: Dataset, connection_lookup: dict[int, Connection]) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
-        if dataset.dataset_type in {DatasetType.CSV_FILE, DatasetType.CSV_FOLDER_FILE, DatasetType.APP_JOIN}:
-            return self._preview_local(dataset, connection_lookup)
-        return self._preview_database(dataset, connection_lookup)
-
     def preview_rule_source(self, source_config: dict[str, Any], connection_lookup: dict[int, Connection]) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
         connection = self._rule_connection(source_config, connection_lookup)
         if connection.connection_type == ConnectionType.CSV:
             return self._preview_csv_source(source_config, connection)
         return self._preview_database_source(source_config, connection)
-
-    def list_dataset_columns(self, dataset: Dataset, connection_lookup: dict[int, Connection]) -> list[str]:
-        if dataset.dataset_type in {DatasetType.CSV_FILE, DatasetType.CSV_FOLDER_FILE, DatasetType.APP_JOIN}:
-            con = duckdb.connect()
-            try:
-                relation = self._build_local_relation(con, dataset, connection_lookup)
-                return [column[0] for column in relation.description]
-            finally:
-                con.close()
-
-        connection = connection_lookup[dataset.connection_id or 0]
-        db_conn = self.connect_database(connection)
-        sql = dataset.config["sql"] if dataset.dataset_type == DatasetType.ORACLE_SQL else f"SELECT * FROM {dataset.config['table_name']}"
-        try:
-            with db_conn.cursor() as cursor:
-                cursor.execute(self.describe_sql(sql))
-                return [column[0] for column in cursor.description]
-        finally:
-            db_conn.close()
 
     def list_connection_targets(self, connection: Connection) -> list[str]:
         if connection.connection_type == ConnectionType.CSV:
@@ -157,33 +133,6 @@ class ConnectorService:
         if connection.connection_type == ConnectionType.CSV:
             return self._csv_source_columns(source_config, connection)
         return self._database_source_columns(source_config, connection)
-
-    def _preview_local(self, dataset: Dataset, connection_lookup: dict[int, Connection]) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
-        con = duckdb.connect()
-        try:
-            relation = self._build_local_relation(con, dataset, connection_lookup)
-            rows = relation.limit(100).fetchall()
-            columns = [item[0] for item in relation.description]
-            stats = {"row_count": con.execute(f"SELECT COUNT(*) FROM ({relation.sql_query()}) q").fetchone()[0]}
-            return columns, [list(row) for row in rows], stats
-        finally:
-            con.close()
-
-    def _preview_database(self, dataset: Dataset, connection_lookup: dict[int, Connection]) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
-        connection = connection_lookup[dataset.connection_id or 0]
-        db_conn = self.connect_database(connection)
-        sql = dataset.config["sql"] if dataset.dataset_type == DatasetType.ORACLE_SQL else f"SELECT * FROM {dataset.config['table_name']}"
-        preview_sql = self.limited_sql(sql, 100, self.database_dialect(connection))
-        try:
-            with db_conn.cursor() as cursor:
-                cursor.execute(preview_sql)
-                rows = cursor.fetchall()
-                columns = [column[0] for column in cursor.description]
-                cursor.execute(f"SELECT COUNT(*) FROM ({sql}) q")
-                stats = {"row_count": cursor.fetchone()[0]}
-            return columns, [list(row) for row in rows], stats
-        finally:
-            db_conn.close()
 
     def _preview_csv_source(self, source_config: dict[str, Any], connection: Connection) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
         csv_path = self._rule_csv_path(connection, source_config)

@@ -21,19 +21,20 @@ class FakeElement:
 class WebSelectionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.app = DQToolWebApp()
-        self.app.rules_table = FakeElement(rows=[{"id": 7, "name": "Required email"}])
+        self.rule_row = {"stable_key": "rule:7", "id": 7, "kind": "rule", "name": "Required email"}
+        self.app.overview_table = FakeElement(rows=[self.rule_row])
         self.app.results_table = FakeElement(rows=[{"id": 12, "status": "FAILED"}])
-        self.app.rule_select = FakeElement()
+        self.app.item_select = FakeElement()
         self.app.result_select = FakeElement()
 
-    def test_clicking_rule_row_selects_rule(self) -> None:
-        event = SimpleNamespace(args=[{}, {"id": 7, "name": "Required email"}, 0])
+    def test_clicking_overview_rule_row_selects_rule(self) -> None:
+        event = SimpleNamespace(args=[{}, self.rule_row, 0])
 
-        self.app._select_rule_row(event)
+        self.app._select_overview_row(event)
 
-        self.assertEqual("7", self.app.selected_rule_id)
-        self.assertEqual("7", self.app.rule_select.value)
-        self.assertEqual([{"id": 7, "name": "Required email"}], self.app.rules_table.selected)
+        self.assertEqual("rule:7", self.app.selected_item_key)
+        self.assertEqual("rule:7", self.app.item_select.value)
+        self.assertEqual([self.rule_row], self.app.overview_table.selected)
 
     def test_clicking_result_row_selects_result_and_opens_details(self) -> None:
         self.app.view_selected_result = Mock()

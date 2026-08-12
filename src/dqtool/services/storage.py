@@ -10,8 +10,6 @@ from typing import Any
 from dqtool.models.entities import (
     Connection,
     ConnectionType,
-    Dataset,
-    DatasetType,
     Role,
     Rule,
     RuleGroup,
@@ -168,15 +166,6 @@ class Storage:
             if "child_group_ids_json" not in group_columns:
                 conn.execute("ALTER TABLE rule_groups ADD COLUMN child_group_ids_json TEXT NOT NULL DEFAULT '[]'")
 
-    def ensure_initial_admin(self, username: str) -> None:
-        with self._session() as conn:
-            existing = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
-            if existing == 0:
-                conn.execute(
-                    "INSERT INTO users(username, role, created_at) VALUES (?, ?, ?)",
-                    (username, Role.ADMIN.value, utc_now()),
-                )
-
     def list_users(self) -> list[User]:
         with self._session() as conn:
             rows = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
@@ -237,45 +226,6 @@ class Storage:
                 payload + (connection.id,),
             )
             return connection.id
-
-    def list_datasets(self) -> list[Dataset]:
-        return self._list_entity("datasets", self._row_to_dataset)
-
-    def save_dataset(self, dataset: Dataset) -> int:
-        name = self._dedupe_name("datasets", dataset.name, dataset.id)
-        payload = (
-            name,
-            dataset.dataset_type.value,
-            dataset.connection_id,
-            dataset.owner_username,
-            dataset.visibility,
-            json.dumps(dataset.allowed_users),
-            json.dumps(dataset.config),
-            json.dumps(dataset.tags),
-            utc_now(),
-        )
-        with self._session() as conn:
-            if dataset.id is None:
-                cursor = conn.execute(
-                    """
-                    INSERT INTO datasets(
-                        name, dataset_type, connection_id, owner_username, visibility, allowed_users_json,
-                        config_json, tags_json, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    payload,
-                )
-                return int(cursor.lastrowid)
-            conn.execute(
-                """
-                UPDATE datasets
-                SET name=?, dataset_type=?, connection_id=?, owner_username=?, visibility=?, allowed_users_json=?,
-                    config_json=?, tags_json=?, updated_at=?
-                WHERE id=?
-                """,
-                payload + (dataset.id,),
-            )
-            return dataset.id
 
     def list_rules(self) -> list[Rule]:
         return self._list_entity("rules", self._row_to_rule)
@@ -579,20 +529,6 @@ class Storage:
             id=row["id"],
             name=row["name"],
             connection_type=ConnectionType(row["connection_type"]),
-            owner_username=row["owner_username"],
-            visibility=row["visibility"],
-            allowed_users=json.loads(row["allowed_users_json"]),
-            config=json.loads(row["config_json"]),
-            tags=json.loads(row["tags_json"]),
-            updated_at=row["updated_at"],
-        )
-
-    def _row_to_dataset(self, row: sqlite3.Row) -> Dataset:
-        return Dataset(
-            id=row["id"],
-            name=row["name"],
-            dataset_type=DatasetType(row["dataset_type"]),
-            connection_id=row["connection_id"],
             owner_username=row["owner_username"],
             visibility=row["visibility"],
             allowed_users=json.loads(row["allowed_users_json"]),

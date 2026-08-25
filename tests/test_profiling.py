@@ -54,6 +54,20 @@ class ProfilingServiceTests(unittest.TestCase):
         self.assertEqual("Alice", profile["columns"]["name"]["top_values"][0]["value"])
         self.assertTrue(profile["profiled_at"])
 
+    def test_profile_reports_monotonic_stage_progress_until_complete(self) -> None:
+        updates: list[tuple[float, str]] = []
+
+        self.service.profile_rule_source(
+            self.source_config,
+            {11: self.connection},
+            progress_callback=lambda value, stage: updates.append((value, stage)),
+        )
+
+        self.assertGreater(len(updates), 3)
+        self.assertEqual(1.0, updates[-1][0])
+        self.assertEqual("Profile complete", updates[-1][1])
+        self.assertEqual(sorted(value for value, _stage in updates), [value for value, _stage in updates])
+
     def test_placeholder_detection_flags_masked_values(self) -> None:
         findings = _placeholder_findings("status", [{"value": "***", "count": 9, "share": 0.9}])
 

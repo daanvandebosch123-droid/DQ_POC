@@ -4,6 +4,7 @@ from io import BytesIO
 from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -97,17 +98,24 @@ def build_anomaly_report_workbook(
 
 
 def _append_sheet(sheet, headers: list[str], rows: list[tuple[Any, ...]]) -> None:
-    sheet.append(headers)
+    safe_headers = [_safe_cell_value(header) for header in headers]
+    safe_rows = [tuple(_safe_cell_value(value) for value in row) for row in rows]
+    sheet.append(safe_headers)
     for cell in sheet[1]:
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
     sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(1, len(rows) + 1)}"
-    for row in rows:
+    sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(1, len(safe_rows) + 1)}"
+    for row in safe_rows:
         sheet.append(row)
-    for index, header in enumerate(headers, start=1):
-        values = [str(header), *(str(row[index - 1] or "") for row in rows)]
+    for index, header in enumerate(safe_headers, start=1):
+        values = [str(header), *(str(row[index - 1] or "") for row in safe_rows)]
         sheet.column_dimensions[get_column_letter(index)].width = min(60, max(12, max(map(len, values)) + 2))
+
+
+def _safe_cell_value(value: Any) -> Any:
+    """Remove control characters that Excel cells cannot represent."""
+    return ILLEGAL_CHARACTERS_RE.sub("", value) if isinstance(value, str) else value
 
 
 def _percent(value: Any) -> float | str:

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -83,6 +84,34 @@ CONNECTION_TYPE_LABELS = {"csv": "CSV", "oracle": "Oracle", "sqlserver": "SQL Se
 CHART_MUTED = "#837d74"
 CHART_GRID = "#e2ded7"
 CHART_SERIES = "#6f6960"
+ANOMALY_PROFILE_CONCURRENCY = 3
+
+
+async def bounded_task_results(
+    items: list[str],
+    worker: Callable[[str], Awaitable[Any]],
+    *,
+    limit: int = ANOMALY_PROFILE_CONCURRENCY,
+) -> AsyncIterator[tuple[str, Any | None, Exception | None]]:
+    """Yield independent task outcomes as they finish, with bounded concurrency."""
+    semaphore = asyncio.Semaphore(max(1, limit))
+
+    async def run(item: str) -> tuple[str, Any | None, Exception | None]:
+        async with semaphore:
+            try:
+                return item, await worker(item), None
+            except Exception as exc:
+                return item, None, exc
+
+    tasks = [asyncio.create_task(run(item)) for item in items]
+    try:
+        for task in asyncio.as_completed(tasks):
+            yield await task
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def dashboard_daily_metrics(runs: list[RuleRun]) -> tuple[list[str], list[float | None], list[int], list[int], list[int | None]]:
@@ -253,6 +282,25 @@ PROFILE_FREQUENCY_CELL_TEMPLATE = r"""
     </q-td>
 """
 
+ANOMALY_PROGRESS_CELL_TEMPLATE = r"""
+    <q-td key="progress" :props="props" style="min-width: 210px">
+        <div class="row items-center no-wrap q-gutter-sm">
+            <q-linear-progress
+                rounded size="8px"
+                :value="props.row.progress_value || 0"
+                :color="props.row.status === 'Failed' ? 'negative' : (props.row.status === 'Completed' ? 'positive' : 'primary')"
+                track-color="grey-3"
+                style="min-width: 110px"
+            />
+            <span class="text-caption text-weight-medium">{{ props.row.progress }}</span>
+        </div>
+        <div class="text-caption text-grey-7 q-mt-xs">{{ props.row.details }}</div>
+        <div v-if="props.row.status === 'Running'" class="text-caption text-grey-6">
+            {{ Math.max(0, Math.round((1 - (props.row.progress_value || 0)) * 100)) }}% remaining
+        </div>
+    </q-td>
+"""
+
 # Official Colruyt Group mark (cropped from the full logo); SVG below is the fallback.
 LOGO_MARK_PATH = Path(__file__).parent / "assets" / "logo_mark.png"
 
@@ -276,6 +324,9 @@ class DQToolWebApp:
         self.profiling_service = ProfilingService(self.connector_service)
         self.ollama_service = OllamaService()
         self._last_anomaly_report: dict[str, Any] | None = None
+        self._anomaly_batch_reports: dict[str, dict[str, Any]] = {}
+        self._active_anomaly_target = ""
+        self._anomaly_check_running = False
         self._profile_suggestions: list[dict[str, Any]] = []
         self._suggestion_ai_notes: dict[int, dict[str, str]] = {}
         self._anomaly_history: list[dict[str, Any]] = []
@@ -347,6 +398,7 @@ class DQToolWebApp:
         self.failed_rows_table: ui.table
         self.schedules_table: ui.table
         self.schedule_execution_table: ui.table
+        self.anomaly_batch_table: ui.table
 
         self.connection_select: ui.select
         self.item_select: ui.select
@@ -362,6 +414,8 @@ class DQToolWebApp:
         self.anomaly_connection_select: ui.select
         self.anomaly_target_select: ui.select
         self.anomaly_summary: ui.markdown
+        self.anomaly_batch_status: ui.label
+        self.run_anomaly_button: ui.button
         self.anomaly_table: ui.table
         self.profile_table: ui.table
         self.gdpr_table: ui.table
@@ -1083,9 +1137,15 @@ class DQToolWebApp:
                             options={}, label="Connection", on_change=self._load_anomaly_targets
                         ).props("outlined dense").classes("grow min-w-[190px] max-w-[280px]")
                         self.anomaly_target_select = ui.select(
-                            options=[], label="File / table", with_input=True, on_change=self._on_anomaly_target_changed
-                        ).props("outlined dense").classes("grow min-w-[190px] max-w-[320px]")
-                        ui.button("Run anomaly check", icon="troubleshoot", on_click=self.run_anomaly_check).props(
+                            options=[],
+                            label="Files / tables",
+                            with_input=True,
+                            multiple=True,
+                            on_change=self._on_anomaly_target_changed,
+                        ).props("outlined dense use-chips options-dense").classes("grow min-w-[240px] max-w-[420px]")
+                        self.run_anomaly_button = ui.button(
+                            "Run anomaly checks", icon="troubleshoot", on_click=self.run_anomaly_check
+                        ).props(
                             "color=primary unelevated no-caps"
                         )
                         ui.button("Export to Excel", icon="download", on_click=self.export_anomaly_report).props(
@@ -1098,11 +1158,17 @@ class DQToolWebApp:
                             "outline no-caps"
                         ).tooltip("Suggests advisory rules and next steps using the configured Ollama endpoint")
                 self.anomaly_summary = ui.markdown(
-                    "Select a connection and a file or table, then run a check to build the first baseline."
+                    "Select a connection and one or more files or tables, then run checks to build the first baselines."
                 ).classes("w-full mt-2")
+                self.anomaly_batch_status = ui.label("").classes("dq-panel-copy text-sm")
+                self.anomaly_batch_table = self._build_table(
+                    ["Target", "Status", "Progress", "Rows", "Findings"], pagination=8
+                )
+                self.anomaly_batch_table.add_slot("body-cell-progress", ANOMALY_PROGRESS_CELL_TEMPLATE)
+                self.anomaly_batch_table.on("rowClick", self._view_anomaly_batch_row)
             with ui.card().classes("dq-soft-card dq-section-card w-full p-6"):
                 ui.label("HISTORY").classes("dq-eyebrow")
-                ui.label("Past checks for this source").classes("dq-panel-title text-xl font-bold")
+                ui.label("Past checks for the active result").classes("dq-panel-title text-xl font-bold")
                 self.anomaly_history_status = ui.label(
                     "Select a connection and a file or table to see its past checks."
                 ).classes("dq-panel-copy text-sm")
@@ -1184,6 +1250,9 @@ class DQToolWebApp:
                 ).classes("w-full")
 
     async def run_anomaly_check(self) -> None:
+        if self._anomaly_check_running:
+            ui.notify("Anomaly checks are already running.", type="warning")
+            return
         if not self.project:
             ui.notify("Open a project first.", type="warning")
             return
@@ -1191,34 +1260,157 @@ class DQToolWebApp:
         if connection is None:
             ui.notify("Select a connection first.", type="warning")
             return
-        target = str(self.anomaly_target_select.value or "").strip()
-        if not target:
-            ui.notify("Select a file or table first.", type="warning")
+        targets = self._selected_anomaly_targets()
+        if not targets:
+            ui.notify("Select one or more files or tables first.", type="warning")
             return
-        source_kind = "csv_file" if connection.connection_type == ConnectionType.CSV else "oracle_table"
-        source_config = {
-            "source_connection_id": int(connection.id or 0),
-            "source_kind": source_kind,
-            "source_name": target,
-            "source_sql": "",
-        }
+        project = self.project
         connections = {item.id: item for item in self._visible_connections() if item.id is not None}
-        self.anomaly_summary.content = f"_Profiling **{target}**..._"
+        self._anomaly_batch_reports = {}
+        self.anomaly_batch_table.rows = [
+            {
+                "id": target,
+                "target": target,
+                "status": "Queued",
+                "progress": "0%",
+                "progress_value": 0.0,
+                "rows": "-",
+                "findings": "-",
+                "details": "Waiting for a worker",
+            }
+            for target in targets
+        ]
+        self.anomaly_batch_table.update()
+        self.anomaly_batch_status.text = (
+            f"Profiling {len(targets)} source(s), with up to {ANOMALY_PROFILE_CONCURRENCY} running concurrently."
+        )
+        self.anomaly_batch_status.update()
+        self.anomaly_summary.content = "_Anomaly checks are running. Select a completed row below to inspect its report._"
         self.anomaly_summary.update()
+        self._anomaly_check_running = True
+        self.run_anomaly_button.disable()
+        self.anomaly_connection_select.disable()
+        self.anomaly_target_select.disable()
+
+        async def profile_target(target: str) -> tuple[dict[str, Any], dict[str, Any]]:
+            loop = asyncio.get_running_loop()
+
+            def report_progress(value: float, stage: str) -> None:
+                loop.call_soon_threadsafe(self._update_anomaly_batch_progress, target, value, stage)
+
+            self._update_anomaly_batch_row(
+                target, status="Running", progress="1%", progress_value=0.01, details="Starting profile"
+            )
+            source_config = self._anomaly_source_config(connection, target)
+            profile = await nicegui_run.io_bound(
+                self.profiling_service.profile_rule_source,
+                source_config,
+                connections,
+                progress_callback=report_progress,
+            )
+            return source_config, profile
+
+        completed_targets: list[str] = []
+        failure_count = 0
         try:
-            profile = await nicegui_run.io_bound(self.profiling_service.profile_rule_source, source_config, connections)
-        except Exception as exc:
-            self.anomaly_summary.content = f"Could not profile **{target}**: {exc}"
+            async for target, result, error in bounded_task_results(targets, profile_target):
+                if error is not None or result is None:
+                    failure_count += 1
+                    detail = str(error or "Unknown profiling error")
+                    self._update_anomaly_batch_row(target, status="Failed", details=detail)
+                    continue
+                source_config, profile = result
+                try:
+                    key = source_profile_key(source_config)
+                    previous = project.storage.latest_source_profile(key)
+                    project.storage.save_source_profile(key, profile)
+                    anomalies = detect_anomalies(previous, profile)
+                except Exception as exc:
+                    failure_count += 1
+                    self._update_anomaly_batch_row(target, status="Failed", details=f"Could not save profile: {exc}")
+                    continue
+                self._anomaly_batch_reports[target] = {
+                    "source_label": target,
+                    "source_config": source_config,
+                    "profile": profile,
+                    "previous": previous,
+                    "anomalies": anomalies,
+                    "key": key,
+                }
+                completed_targets.append(target)
+                self._update_anomaly_batch_row(
+                    target,
+                    status="Completed",
+                    progress="100%",
+                    progress_value=1.0,
+                    rows=f"{int(profile.get('row_count') or 0):,}",
+                    findings=str(len(anomalies)),
+                    details=(
+                        "Baseline saved"
+                        if previous is None
+                        else f"{sum(1 for item in anomalies if item.get('severity') == 'high')} high severity"
+                    ),
+                )
+        finally:
+            self._anomaly_check_running = False
+            self.run_anomaly_button.enable()
+            self.anomaly_connection_select.enable()
+            self.anomaly_target_select.enable()
+
+        if completed_targets:
+            target = self._active_anomaly_target if self._active_anomaly_target in completed_targets else completed_targets[0]
+            self._show_anomaly_batch_report(target)
+        else:
+            self.anomaly_summary.content = "No anomaly checks completed successfully. Review the errors in the table above."
             self.anomaly_summary.update()
-            ui.notify(str(exc), type="negative")
+        self.anomaly_batch_status.text = (
+            f"Finished: {len(completed_targets)} completed, {failure_count} failed. "
+            "Click a completed row to inspect its report."
+        )
+        self.anomaly_batch_status.update()
+        self._set_last_action(f"Ran anomaly checks for {len(targets)} source(s)")
+        ui.notify(
+            f"{len(completed_targets)} anomaly check(s) completed; {failure_count} failed.",
+            type="positive" if not failure_count else "warning",
+        )
+
+    def _update_anomaly_batch_progress(self, target: str, value: float, stage: str) -> None:
+        percentage = max(0, min(100, round(value * 100)))
+        self._update_anomaly_batch_row(
+            target,
+            progress=f"{percentage}%",
+            progress_value=max(0.0, min(1.0, value)),
+            details=stage,
+        )
+
+    def _update_anomaly_batch_row(self, target: str, **values: Any) -> None:
+        row = next((item for item in self.anomaly_batch_table.rows if item.get("id") == target), None)
+        if row is None:
             return
-        key = source_profile_key(source_config)
-        previous = self.project.storage.latest_source_profile(key)
-        self.project.storage.save_source_profile(key, profile)
-        anomalies = detect_anomalies(previous, profile)
-        self._render_anomaly_report(source_config, target, profile, previous, anomalies, key)
+        row.update(values)
+        self.anomaly_batch_table.update()
+
+    def _view_anomaly_batch_row(self, event: Any) -> None:
+        row = self._row_from_click_event(event)
+        if row is None or row.get("status") != "Completed":
+            return
+        self._show_anomaly_batch_report(str(row["target"]))
+
+    def _show_anomaly_batch_report(self, target: str) -> None:
+        report = self._anomaly_batch_reports.get(target)
+        if report is None:
+            return
+        self._active_anomaly_target = target
+        self._render_anomaly_report(
+            report["source_config"],
+            target,
+            report["profile"],
+            report["previous"],
+            report["anomalies"],
+            report["key"],
+        )
         self._load_anomaly_history()
-        self._set_last_action(f"Ran anomaly check for {target}")
+        self._highlight_table_row(self.anomaly_batch_table, target)
 
     def export_anomaly_report(self) -> None:
         report = self._last_anomaly_report
@@ -1366,7 +1558,7 @@ class DQToolWebApp:
         if not self.project:
             return
         connection = self._anomaly_connection()
-        target = str(self.anomaly_target_select.value or "").strip()
+        target = self._current_anomaly_target()
         if connection is None or not target:
             self._anomaly_history = []
             self.anomaly_history_table.rows = []
@@ -1374,13 +1566,7 @@ class DQToolWebApp:
             self.anomaly_history_status.text = "Select a connection and a file or table to see its past checks."
             self.anomaly_history_status.update()
             return
-        source_kind = "csv_file" if connection.connection_type == ConnectionType.CSV else "oracle_table"
-        self._anomaly_history_source_config = {
-            "source_connection_id": int(connection.id or 0),
-            "source_kind": source_kind,
-            "source_name": target,
-            "source_sql": "",
-        }
+        self._anomaly_history_source_config = self._anomaly_source_config(connection, target)
         self._anomaly_history_key = source_profile_key(self._anomaly_history_source_config)
         self._anomaly_history = self.project.storage.list_source_profiles(self._anomaly_history_key)
         rows = []
@@ -1421,7 +1607,7 @@ class DQToolWebApp:
         profile = self._anomaly_history[index]
         previous = self._anomaly_history[index - 1] if index > 0 else None
         anomalies = detect_anomalies(previous, profile)
-        target = str(self.anomaly_target_select.value or "").strip()
+        target = self._current_anomaly_target()
         self._render_anomaly_report(
             self._anomaly_history_source_config, target, profile, previous, anomalies, self._anomaly_history_key,
             is_history_view=True,
@@ -1543,23 +1729,56 @@ class DQToolWebApp:
     def _anomaly_connection(self) -> Connection | None:
         return self._connection_from_select(self.anomaly_connection_select)
 
+    def _selected_anomaly_targets(self) -> list[str]:
+        value = self.anomaly_target_select.value
+        raw_targets = value if isinstance(value, (list, tuple, set)) else [value]
+        targets: list[str] = []
+        for raw_target in raw_targets:
+            target = str(raw_target or "").strip()
+            if target and target not in targets:
+                targets.append(target)
+        return targets
+
+    @staticmethod
+    def _anomaly_source_config(connection: Connection, target: str) -> dict[str, Any]:
+        return {
+            "source_connection_id": int(connection.id or 0),
+            "source_kind": "csv_file" if connection.connection_type == ConnectionType.CSV else "oracle_table",
+            "source_name": target,
+            "source_sql": "",
+        }
+
+    def _current_anomaly_target(self) -> str:
+        targets = self._selected_anomaly_targets()
+        if self._active_anomaly_target:
+            return self._active_anomaly_target
+        return targets[0] if targets else ""
+
     async def _load_anomaly_targets(self, _event: Any = None) -> None:
-        await self._load_connection_targets(self.anomaly_connection_select, self.anomaly_target_select)
+        self._active_anomaly_target = ""
+        self._anomaly_batch_reports = {}
+        await self._load_connection_targets(self.anomaly_connection_select, self.anomaly_target_select, multiple=True)
+        targets = self._selected_anomaly_targets()
+        self._active_anomaly_target = targets[0] if targets else ""
         self._remember_anomaly_selection()
         self._load_anomaly_history()
 
     def _on_anomaly_target_changed(self, _event: Any = None) -> None:
+        targets = self._selected_anomaly_targets()
+        if self._active_anomaly_target not in targets:
+            self._active_anomaly_target = targets[0] if targets else ""
         self._remember_anomaly_selection()
         self._load_anomaly_history()
 
     def _remember_anomaly_selection(self) -> None:
         """Keep this browser user's most recent anomaly source, without storing any credentials."""
-        if not self.current_project or not self.anomaly_connection_select.value or not self.anomaly_target_select.value:
+        target = self._current_anomaly_target()
+        if not self.current_project or not self.anomaly_connection_select.value or not target:
             return
         nicegui_app.storage.user["recent_anomaly_selection"] = {
             "project_id": self.current_project.id,
             "connection_id": str(self.anomaly_connection_select.value),
-            "target": str(self.anomaly_target_select.value),
+            "target": target,
         }
 
     def _saved_anomaly_selection(self) -> dict[str, str] | None:
@@ -1574,21 +1793,24 @@ class DQToolWebApp:
 
     async def _restore_anomaly_target(self, saved: dict[str, str]) -> None:
         """Restore a saved table only after reloading the current connection's available targets."""
-        await self._load_connection_targets(self.anomaly_connection_select, self.anomaly_target_select)
+        await self._load_connection_targets(self.anomaly_connection_select, self.anomaly_target_select, multiple=True)
         if saved["target"] not in self.anomaly_target_select.options:
             return
-        self.anomaly_target_select.value = saved["target"]
+        self.anomaly_target_select.value = [saved["target"]]
+        self._active_anomaly_target = saved["target"]
         self.anomaly_target_select.update()
         self._load_anomaly_history()
 
     async def _load_preview_targets(self, _event: Any = None) -> None:
         await self._load_connection_targets(self.preview_connection_select, self.preview_target_select)
 
-    async def _load_connection_targets(self, connection_select: ui.select, target_select: ui.select) -> None:
+    async def _load_connection_targets(
+        self, connection_select: ui.select, target_select: ui.select, *, multiple: bool = False
+    ) -> None:
         connection = self._connection_from_select(connection_select)
         if connection is None:
             target_select.options = []
-            target_select.value = None
+            target_select.value = [] if multiple else None
             target_select.update()
             return
         try:
@@ -1596,14 +1818,19 @@ class DQToolWebApp:
         except Exception as exc:
             targets = []
             ui.notify(f"Could not load files or tables: {exc}", type="negative")
-        current = str(target_select.value or "")
         target_select.options = targets
-        if current in targets:
-            target_select.value = current
-        elif len(targets) == 1:
-            target_select.value = targets[0]
+        if multiple:
+            current_values = target_select.value if isinstance(target_select.value, (list, tuple, set)) else [target_select.value]
+            selected = [str(value) for value in current_values if str(value or "") in targets]
+            target_select.value = selected or ([targets[0]] if len(targets) == 1 else [])
         else:
-            target_select.value = None
+            current = str(target_select.value or "")
+            if current in targets:
+                target_select.value = current
+            elif len(targets) == 1:
+                target_select.value = targets[0]
+            else:
+                target_select.value = None
         target_select.update()
 
     async def explain_selected_anomalies(self) -> None:

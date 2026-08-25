@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DQTool — Enterprise Architecture Brief</title>
+<style>
+  @page { size: A4; margin: 12mm; }
+  * { box-sizing: border-box; }
+  body { color: #172033; font: 10pt/1.42 Arial, sans-serif; margin: 0; }
+  h1, h2, h3 { color: #193b63; margin: 0 0 8px; }
+  h1 { font-size: 26pt; line-height: 1.05; } h2 { font-size: 16pt; margin-top: 20px; border-bottom: 2px solid #19a7a0; padding-bottom: 4px; }
+  h3 { font-size: 11pt; margin-top: 12px; } p { margin: 5px 0 9px; } ul { margin: 5px 0 9px; padding-left: 20px; }
+  .cover { min-height: 260mm; padding: 20mm 12mm; background: linear-gradient(135deg,#eef7f7 0%,#f8fbff 58%,#eaf0fb 100%); page-break-after: always; }
+  .eyebrow { text-transform: uppercase; color: #0c7775; font-size: 9pt; font-weight: bold; letter-spacing: 1.3px; }
+  .subtitle { font-size: 14pt; color: #48617e; max-width: 640px; }
+  .cover-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-top: 42px; }
+  .cover-card, .card { background: white; border: 1px solid #d8e4eb; border-radius: 8px; padding: 11px; box-shadow: 0 2px 8px #193b6312; }
+  .cover-card b { display: block; color: #193b63; margin-bottom: 3px; }
+  .tag { display: inline-block; background: #dff5f3; color: #076b68; padding: 3px 8px; border-radius: 12px; font-size: 8pt; font-weight: bold; margin: 1px 3px 1px 0; }
+  .note { background:#fff7dd; border-left:4px solid #f3b623; padding:8px 10px; margin:9px 0; }
+  .grid { display:grid; grid-template-columns: repeat(2,1fr); gap: 10px; } .grid3 { display:grid; grid-template-columns: repeat(3,1fr); gap: 8px; }
+  .component { border-top: 4px solid #19a7a0; } .component h3 { margin-top: 0; }
+  .diagram { background:#f6fafc; border:1px solid #dce7ee; border-radius:8px; padding:10px; margin:10px 0; text-align:center; }
+  .flow { display:flex; justify-content:center; align-items:stretch; gap:5px; flex-wrap:wrap; } .box { background:white; border:1px solid #b7cad9; border-radius:6px; padding:8px; min-width:105px; max-width:155px; font-size:8.5pt; } .box.primary { background:#193b63; border-color:#193b63; color:white; } .box.teal { background:#e0f5f3; border-color:#59bcb8; } .arrow { color:#0c8581; font-size:18pt; align-self:center; }
+  table { width:100%; border-collapse:collapse; margin:8px 0 12px; font-size:8.5pt; } th { background:#193b63; color:white; text-align:left; } th,td { padding:6px 7px; vertical-align:top; border:1px solid #d7e1e7; } tr:nth-child(even) td { background:#f6fafc; }
+  .small { font-size:8.5pt; color:#536a80; } .page-break { page-break-before:always; }
+  .storage { background:#f7f5ff; border-left:4px solid #7657b5; padding:10px; font-family:Consolas,monospace; font-size:8.5pt; white-space:pre-wrap; }
+  .risk { border-left:4px solid #dc5a5a; background:#fff5f5; padding:8px 10px; margin:8px 0; }
+  .footer { color:#6d7f90; border-top:1px solid #d7e1e7; padding-top:7px; font-size:8pt; margin-top:18px; }
+</style>
+</head>
+<body>
+<section class="cover">
+  <div class="eyebrow">Architecture handover document</div>
+  <h1>DQTool</h1>
+  <p class="subtitle">Enterprise architecture brief for a data-quality, profiling, anomaly-detection and rule-execution application.</p>
+  <p><span class="tag">Windows-first</span><span class="tag">Python 3.11+</span><span class="tag">NiceGUI</span><span class="tag">SQLite</span><span class="tag">Optional local AI</span></p>
+  <div class="cover-grid">
+    <div class="cover-card"><b>Purpose</b>Define, run and monitor data-quality checks across CSV and enterprise data sources.</div>
+    <div class="cover-card"><b>Current architecture</b>One deployable Python process containing the browser UI, application services and scheduler.</div>
+    <div class="cover-card"><b>Key design question</b>Determine the controls and services required to evolve from team deployment to enterprise operation.</div>
+  </div>
+  <div style="margin-top:70px" class="small">Prepared from the DQTool source and technical documentation. This describes the implemented architecture, followed by enterprise decisions to validate.</div>
+</section>
+
+<h2>1. System context</h2>
+<p>DQTool is a browser-accessed application for data stewards, project administrators and users. It reads from configured CSV and database sources, stores workspace/project metadata locally, and can optionally obtain AI guidance from an Ollama endpoint.</p>
+<div class="diagram">
+  <div class="flow">
+    <div class="box">Business users<br><span class="small">Browser clients</span></div><div class="arrow">→ HTTP →</div>
+    <div class="box primary">DQTool application host<br><span style="font-size:8pt">NiceGUI + services + scheduler</span></div><div class="arrow">→</div>
+    <div class="box teal">Enterprise data sources<br><span class="small">Oracle, SQL Server, DB2, Sybase, CSV</span></div>
+  </div>
+  <div class="flow" style="margin-top:8px">
+    <div class="box">Windows Credential Manager<br><span class="small">Secrets</span></div><div class="arrow">↔</div>
+    <div class="box">Shared workspace folder<br><span class="small">SQLite + files</span></div><div class="arrow">← optional HTTP →</div>
+    <div class="box teal">Ollama endpoint<br><span class="small">AI guidance only</span></div>
+  </div>
+</div>
+<div class="note"><b>Network default:</b> the server listens on <code>127.0.0.1:8080</code>. LAN access requires explicitly setting <code>DQTOOL_HOST=0.0.0.0</code> and allowing inbound Windows Firewall traffic.</div>
+
+<h2>2. Application containers and responsibilities</h2>
+<div class="grid3">
+  <div class="card component"><h3>Presentation</h3><b>NiceGUI Web UI</b><br>Browser session, login, dashboards, forms, preview, export and permission-aware actions.</div>
+  <div class="card component"><h3>Workspace & project</h3><b>Workspace / Storage services</b><br>Accounts, memberships, roles, projects, SQLite migrations and CRUD.</div>
+  <div class="card component"><h3>Source access</h3><b>Connector service</b><br>Database/CSV connection tests, target discovery, previews and source queries.</div>
+  <div class="card component"><h3>Execution</h3><b>Execution service</b><br>Rule evaluation, status/counts/runtime, bounded failed-row evidence and result persistence.</div>
+  <div class="card component"><h3>Analysis</h3><b>Profiling service</b><br>Column statistics, drift, anomaly/content findings, GDPR review flags and rule ideas.</div>
+  <div class="card component"><h3>Automation & AI</h3><b>Scheduler / Ollama service</b><br>Minute polling for due rules; optional AI explanations and recommendations.</div>
+</div>
+
+<h2>3. Data stores and locations</h2>
+<div class="storage">&lt;workspace-root&gt;/
+  dqtool_workspace.sqlite                 shared accounts, projects, access
+  &lt;project-folder&gt;/
+    dqtool_project.sqlite                 rules, connections, profiles, runs, schedules
+    uploads/                              browser-uploaded CSV source files
+    results/                              failed-row evidence files
+    exports/                              generated CSV/XLSX reports</div>
+<table><tr><th>Store</th><th>Data</th><th>Architectural concern</th></tr>
+<tr><td>Workspace SQLite</td><td>Users, salted password hashes, projects and memberships.</td><td>Back up with all projects; assess SQLite concurrency and shared-filesystem suitability.</td></tr>
+<tr><td>Project SQLite</td><td>Connection definitions without passwords, rules/groups, schedules, run history and profiles.</td><td>Each project is independently portable but needs consistent backup with project files.</td></tr>
+<tr><td>Uploads, results, exports</td><td>CSV source files, failed-row evidence, generated reports.</td><td>Potentially sensitive data: apply ACL, encryption, retention, DLP and malware-scanning policy.</td></tr>
+<tr><td>Windows Credential Manager</td><td>Per-user source passwords and optional Cloudflare AI service token.</td><td>Local to the Windows host/user; central-server process identity is important.</td></tr>
+<tr><td>%LOCALAPPDATA%\DQTool</td><td>Local settings, workspace selection, AI endpoint/model, session signing secret.</td><td>Host-local configuration; needs deployment/configuration management approach.</td></tr></table>
+
+<div class="page-break"></div>
+<h2>4. Integrations and technology</h2>
+<table><tr><th>Integration</th><th>Technology</th><th>Use</th><th>Direction</th></tr>
+<tr><td>Browser client</td><td>HTTP, NiceGUI cookies/sessions</td><td>User access to DQTool.</td><td>Inbound</td></tr>
+<tr><td>CSV</td><td>Filesystem and DuckDB</td><td>Uploaded source files, profile, preview and rule evaluation.</td><td>Read; uploads write to project folder</td></tr>
+<tr><td>Oracle</td><td><code>oracledb</code></td><td>Profile, preview and rule execution.</td><td>Outbound read access recommended</td></tr>
+<tr><td>SQL Server / DB2 / Sybase ASE / Sybase IQ</td><td><code>pyodbc</code> + native ODBC driver</td><td>Profile, preview and rule execution.</td><td>Outbound read access recommended</td></tr>
+<tr><td>Ollama (optional)</td><td>HTTP; default <code>http://localhost:11434</code>, <code>qwen3:8b</code></td><td>AI explanations and recommended next actions.</td><td>Outbound</td></tr>
+<tr><td>Cloudflare Access (optional)</td><td>HTTP service-token headers</td><td>Access to protected remote Ollama endpoint.</td><td>Outbound</td></tr></table>
+<p>Native ODBC drivers are operating-system dependencies on the DQTool host. The currently supported defaults are SQL Server ODBC Driver 17, IBM DB2 ODBC Driver, Adaptive Server Enterprise and Sybase IQ (all overrideable per connection).</p>
+
+<h2>5. Primary data flows</h2>
+<div class="grid">
+  <div class="card"><h3>Rule execution</h3><div class="flow"><div class="box">UI checks access</div><div class="arrow">→</div><div class="box">Load rule + source</div><div class="arrow">→</div><div class="box teal">Read source</div><div class="arrow">→</div><div class="box">Persist run & evidence</div></div><p class="small">Creates passed/failed/error status, checked/failed counts, UTC timestamps, runtime, executor and optional failed-row file path.</p></div>
+  <div class="card"><h3>Profiling and anomaly detection</h3><div class="flow"><div class="box teal">Read source statistics</div><div class="arrow">→</div><div class="box">Persist profile snapshot</div><div class="arrow">→</div><div class="box">Compare prior snapshot</div><div class="arrow">→</div><div class="box">Findings / rule ideas</div></div><p class="small">Profiles null/blank rates, distinct counts, type/meaning, ranges, averages, frequencies, outliers and privacy-review signals.</p></div>
+  <div class="card"><h3>Scheduled execution</h3><div class="flow"><div class="box">Minute poller</div><div class="arrow">→</div><div class="box">Find due schedules</div><div class="arrow">→</div><div class="box">Run rule/group</div><div class="arrow">→</div><div class="box">Store result + next run</div></div><p class="small">Hourly, daily or weekly. Daily/weekly schedules use Europe/Brussels; persisted timestamps are UTC.</p></div>
+  <div class="card"><h3>Optional AI guidance</h3><div class="flow"><div class="box">Profile metadata</div><div class="arrow">→</div><div class="box teal">Ollama endpoint</div><div class="arrow">→</div><div class="box">Display advice</div></div><p class="small">Normal flows send metadata only: statistics, categories and rule ideas—not source rows, values or finding messages. AI never saves, executes or schedules a rule.</p></div>
+</div>
+
+<h2>6. Identity, access and secrets</h2>
+<div class="grid">
+ <div class="card"><h3>Implemented access model</h3><ul><li><b>Workspace Admin:</b> creates accounts/projects, assigns access and administers all projects.</li><li><b>Project Admin:</b> administers members and all items in a project.</li><li><b>Project User:</b> accesses permitted project work and own items.</li><li>Items may be private, shared project-wide or shared with named users.</li></ul></div>
+ <div class="card"><h3>Secrets model</h3><ul><li>Application passwords are salted PBKDF2-SHA256 hashes in workspace SQLite.</li><li>Database passwords are not in project SQLite; they are stored per Windows user in Credential Manager.</li><li>Cloudflare AI credentials also use Credential Manager.</li><li>Source accounts should be read-only; custom SQL is trusted-user functionality.</li></ul></div>
+</div>
+<div class="risk"><b>Trust-boundary focus:</b> uploaded files, failed-row evidence and exports may contain raw business or personal data. The architecture should explicitly show filesystem access controls and the source-data boundary. Any opt-in AI sample-value flow should be separately approved.</div>
+
+<h2>7. Deployment model and constraints</h2>
+<div class="diagram"><div class="flow"><div class="box">Browser clients<br><span class="small">LAN / localhost</span></div><div class="arrow">→</div><div class="box primary">Windows host<br><span style="font-size:8pt">DQTool Python process<br>NiceGUI + scheduler</span></div><div class="arrow">→</div><div class="box teal">Database network zone</div></div><div class="flow" style="margin-top:8px"><div class="box">Workspace file share / disk</div><div class="arrow">↔</div><div class="box">Credential Manager</div><div class="arrow">↔ optional →</div><div class="box teal">Local / remote Ollama</div></div></div>
+<ul><li>One application process hosts UI, execution, profiling and scheduling.</li><li>There is no message broker, work queue, worker tier, API gateway, load balancer or separate scheduler service.</li><li>Schedules only run while the application process is alive. Run as a managed Windows service or equivalent for unattended operation.</li><li>Horizontal scaling is not currently suitable: SQLite, local credentials and in-process scheduling create node affinity and duplicate-execution risk.</li><li>SQLite must be assessed for concurrent writes, locking on any network share, backup consistency and high-availability needs.</li></ul>
+
+<h2>8. Enterprise architecture decisions</h2>
+<table><tr><th>Decision area</th><th>Question to resolve</th></tr>
+<tr><td>Operating model</td><td>Is DQTool a local tool, departmental central server or enterprise service?</td></tr>
+<tr><td>Identity</td><td>Should local accounts be replaced with OIDC, SAML, Active Directory or another corporate identity provider?</td></tr>
+<tr><td>Secrets</td><td>Should Windows Credential Manager be replaced or supplemented with an enterprise secrets vault?</td></tr>
+<tr><td>Persistence</td><td>Should SQLite and filesystem storage move to managed database and object/document storage for concurrency, audit and HA?</td></tr>
+<tr><td>Scheduling</td><td>Should the in-process poller move to a durable enterprise scheduler/job runner?</td></tr>
+<tr><td>AI governance</td><td>May metadata leave the application boundary? Which approved model endpoint and data-classification controls apply?</td></tr>
+<tr><td>Data protection</td><td>What retention, encryption, DLP, ACL, malware scanning and disposal policies govern uploaded CSVs, evidence and exports?</td></tr>
+<tr><td>Custom SQL</td><td>Which roles may use it, which database identities, timeouts, allowlists and audit controls are required?</td></tr></table>
+<p class="footer">DQTool enterprise architecture brief · Source: application code and technical documentation · Generated 13 August 2026</p>
+</body></html>

@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DQTool — Complete Enterprise Architecture Brief</title>
+<style>
+  @page { size: A4; margin: 14mm; }
+  * { box-sizing: border-box; }
+  body { color: #172033; font: 10pt/1.5 "Segoe UI", Arial, sans-serif; margin: 0; background:#fff; }
+  .cover { min-height: 265mm; padding: 32mm 18mm; background: linear-gradient(135deg,#edf8f7,#f7fbff 58%,#eaf0fb); }
+  .eyebrow { color:#087775; font-size:9pt; font-weight:bold; letter-spacing:1.4px; text-transform:uppercase; }
+  h1 { color:#193b63; font-size:29pt; line-height:1.05; margin:8px 0; } h2 { color:#193b63; font-size:16pt; margin:0 0 12px; }
+  .lead { color:#4d6682; font-size:14pt; max-width:600px; } .chips { margin-top:18px; } .chip { display:inline-block; padding:4px 8px; background:#dff5f3; border-radius:11px; color:#08706d; font-size:8.5pt; font-weight:bold; margin-right:4px; }
+  .visual { margin-top:55px; background:white; border:1px solid #cfe1e7; border-radius:10px; padding:16px; box-shadow:0 3px 12px #193b6310; }
+  .flow { display:flex; align-items:center; justify-content:center; gap:6px; } .box { border:1px solid #b6cbd7; background:#f8fbfc; border-radius:6px; padding:9px; width:142px; text-align:center; font-size:8.5pt; } .core { color:white; border-color:#193b63; background:#193b63; } .arrow { font-size:18pt; color:#0a8883; }
+  .appendix { page-break-before:always; } .appendix-head { border-bottom:3px solid #19a7a0; margin-bottom:15px; padding-bottom:7px; }
+  .visual-page { page-break-before:always; } .visual-page h2 { border-bottom:3px solid #19a7a0; padding-bottom:7px; }
+  .architecture { border:1px solid #d4e1e8; border-radius:10px; background:#f6fafc; padding:14px; margin:12px 0; }
+  .architecture-title { color:#193b63; font-size:11pt; font-weight:bold; margin-bottom:9px; }
+  .wide { width:300px; } .source { background:#e0f5f3; border-color:#69c4be; } .store { background:#f2edff; border-color:#ad99de; }
+  .row { display:flex; justify-content:center; align-items:center; gap:7px; margin:7px 0; } .line { border-left:2px solid #0a8883; height:19px; margin:auto; width:0; } .line-label { text-align:center; color:#087773; font-size:8pt; margin:1px 0; }
+  .branches { display:grid; grid-template-columns:1fr 1fr; gap:28px; max-width:540px; margin:0 auto; } .branch { text-align:center; } .connector { height:19px; border-left:2px solid #0a8883; margin:0 auto; width:0; }
+  .sequence { display:grid; grid-template-columns:minmax(0,1fr) 22px minmax(0,1fr) 22px minmax(0,1fr) 22px minmax(0,1fr); align-items:center; gap:5px; }
+  .sequence .box { width:auto; min-width:0; min-height:62px; display:flex; align-items:center; justify-content:center; padding:8px 6px; }
+  .sequence .arrow { font-size:15pt; text-align:center; }
+  .process-page { page-break-before:always; }
+  .process-page h2 { border-bottom:3px solid #19a7a0; padding-bottom:7px; }
+  .process-page .architecture { padding:16px; margin:15px 0; background:linear-gradient(135deg,#f7fbfd,#f1f7fa); }
+  .step { position:relative; padding-top:20px !important; font-weight:600; box-shadow:0 2px 5px #193b630d; }
+  .step::before { content:attr(data-step); position:absolute; top:-11px; left:50%; transform:translateX(-50%); width:23px; height:23px; border-radius:50%; background:#193b63; color:white; display:flex; align-items:center; justify-content:center; font-size:8pt; font-weight:700; border:3px solid #f6fafc; }
+  .flow-caption { text-align:center; color:#5c7185; font-size:8.5pt; margin:9px 0 0; }
+  #brief-source { display:none; }
+  #brief-rendered { font-size:9.4pt; }
+  #brief-rendered h1 { font-size:21pt; margin:0 0 8px; }
+  #brief-rendered h2 { font-size:15pt; border-bottom:2px solid #19a7a0; padding-bottom:5px; margin:22px 0 9px; break-after:avoid; }
+  #brief-rendered h3 { color:#087775; font-size:11.5pt; margin:15px 0 6px; break-after:avoid; }
+  #brief-rendered p { margin:5px 0 9px; }
+  #brief-rendered ul, #brief-rendered ol { margin:5px 0 11px; padding-left:20px; }
+  #brief-rendered li { margin:3px 0; }
+  #brief-rendered table { width:100%; border-collapse:collapse; margin:9px 0 14px; font-size:8.35pt; break-inside:auto; }
+  #brief-rendered th { background:#193b63; color:#fff; text-align:left; font-weight:600; }
+  #brief-rendered th, #brief-rendered td { border:1px solid #d5e1e8; padding:6px 7px; vertical-align:top; }
+  #brief-rendered tr:nth-child(even) td { background:#f6fafc; }
+  #brief-rendered tr { break-inside:avoid; }
+  #brief-rendered code { color:#5b3d91; background:#f2edff; border-radius:3px; padding:1px 4px; font:8.2pt Consolas,monospace; }
+  .diagram-reference { background:#eaf7f6; border-left:4px solid #19a7a0; color:#31546b; padding:9px 11px; border-radius:0 6px 6px 0; margin:8px 0 12px; }
+  .storage-tree { background:#17243a; color:#edf6fb; padding:12px 14px; border-radius:7px; font:8.4pt/1.55 Consolas,monospace; white-space:pre-wrap; margin:8px 0 13px; }
+  .section-summary { color:#4d6682; font-size:10pt; }
+  .footer { margin-top:15px; color:#6a7e91; font-size:8pt; }
+</style>
+</head>
+<body>
+<section class="cover">
+  <div class="eyebrow">Complete architecture handover</div>
+  <h1>DQTool<br>Enterprise Architecture Brief</h1>
+  <p class="lead">Visual executive overview plus the complete, unabridged technical architecture brief.</p>
+  <div class="chips"><span class="chip">Python 3.11+</span><span class="chip">NiceGUI</span><span class="chip">SQLite</span><span class="chip">Windows</span><span class="chip">Optional Ollama AI</span></div>
+  <div class="visual"><div class="flow"><div class="box">Business users<br><small>Browser clients</small></div><div class="arrow">→</div><div class="box core">DQTool host<br><small>UI · services · scheduler</small></div><div class="arrow">→</div><div class="box">Data sources<br><small>CSV and databases</small></div></div><div class="flow" style="margin-top:8px"><div class="box">Workspace storage<br><small>SQLite + project files</small></div><div class="arrow">↔</div><div class="box">Credential Manager<br><small>Local secrets</small></div><div class="arrow">↔</div><div class="box">Optional Ollama<br><small>AI advice</small></div></div></div>
+  <p class="footer">Generated 13 August 2026 · The following appendix reproduces the complete technical content.</p>
+</section>
+<section class="visual-page">
+  <div class="eyebrow">Visual architecture diagrams</div><h2>DQTool system and service flows</h2>
+  <div class="architecture">
+    <div class="architecture-title">System context and container view</div>
+    <div class="row"><div class="box">Business users, data stewards<br><small>and project administrators</small></div></div>
+    <div class="line-label">HTTP — local by default; optional LAN access</div><div class="line"></div>
+    <div class="row"><div class="box core wide">DQTool application host (Windows)<br><small>Python 3.11+ · NiceGUI web server · 127.0.0.1:8080 by default</small><br><small>Web UI · authentication and role checks · workspace/project services · rule execution · profiling/anomaly detection · scheduler · exports · optional AI client</small></div></div>
+    <div class="branches"><div class="branch"><div class="connector"></div><div class="line-label">Source reads</div><div class="box source">CSV files<br>Oracle · SQL Server · DB2<br>Sybase ASE · Sybase IQ / SQL Anywhere</div></div><div class="branch"><div class="connector"></div><div class="line-label">Local filesystem / SQLite</div><div class="box store">Shared workspace folder<br><small>Workspace database · project databases · uploads · results · exports</small></div></div></div>
+    <div class="line-label" style="margin-top:8px">Optional AI HTTP API</div><div class="line"></div>
+    <div class="row"><div class="box source">Ollama model service<br><small>Local or remote endpoint; advisory AI only</small></div></div>
+  </div>
+</section>
+<section class="process-page">
+  <div class="eyebrow">Operational flows</div><h2>How data moves through DQTool</h2>
+  <div class="architecture"><div class="architecture-title">Interactive rule execution</div><div class="sequence"><div class="box step" data-step="1">User selects a rule</div><div class="arrow">&rarr;</div><div class="box step" data-step="2">Access check and configuration lookup</div><div class="arrow">&rarr;</div><div class="box source step" data-step="3">Read source through its connector</div><div class="arrow">&rarr;</div><div class="box store step" data-step="4">Persist run and optional evidence</div></div><p class="flow-caption">The same execution service handles manual, batch, group and scheduled runs.</p></div>
+  <div class="architecture"><div class="architecture-title">Profiling and anomaly detection</div><div class="sequence"><div class="box source step" data-step="1">Read column statistics</div><div class="arrow">&rarr;</div><div class="box store step" data-step="2">Save a profile snapshot</div><div class="arrow">&rarr;</div><div class="box step" data-step="3">Compare with the prior profile</div><div class="arrow">&rarr;</div><div class="box step" data-step="4">Present drift, GDPR review and rule ideas</div></div><p class="flow-caption">Profile suggestions remain advisory and require explicit user review before becoming rules.</p></div>
+  <div class="architecture"><div class="architecture-title">Scheduled execution</div><div class="sequence"><div class="box step" data-step="1">Minute poller finds a due rule or group</div><div class="arrow">&rarr;</div><div class="box step" data-step="2">Execute through the rule service</div><div class="arrow">&rarr;</div><div class="box store step" data-step="3">Store result with schedule ID</div><div class="arrow">&rarr;</div><div class="box step" data-step="4">Calculate and save the next run</div></div><p class="flow-caption">Daily and weekly schedules use Europe/Brussels; timestamps are persisted in UTC.</p></div>
+  <div class="architecture"><div class="architecture-title">Optional AI guidance</div><div class="sequence"><div class="box step" data-step="1">Prepare approved profile metadata</div><div class="arrow">&rarr;</div><div class="box source step" data-step="2">Send HTTP request to Ollama</div><div class="arrow">&rarr;</div><div class="box step" data-step="3">Receive explanation or recommendations</div><div class="arrow">&rarr;</div><div class="box step" data-step="4">Display advisory output in the UI</div></div><p class="flow-caption">AI is optional and cannot create, run or schedule rules.</p></div>
+</section>
+<section class="appendix"><div class="appendix-head"><div class="eyebrow">Technical reference</div><h2>Complete architecture content</h2><p class="section-summary">The sections below contain the full architecture brief in a clean, print-ready format. Text flow diagrams are represented visually in the preceding section.</p></div><div id="brief-rendered"></div><pre id="brief-source">
++# DQTool enterprise architecture brief
+
+This brief provides the technical information needed to produce DQTool context, container, deployment, data-flow, and security diagrams.
+
+## Application summary
+
+DQTool is a Windows-first Python web application for defining and executing data-quality checks against CSV files and enterprise databases. It supports team workspaces and projects, role-based access, source profiling, anomaly and drift detection, rule scheduling, result evidence, Excel/CSV exports, and optional AI assistance.
+
+It is currently a single deployable process: the NiceGUI web UI and background scheduler run in the same Python process.
+
+## Core container view
+
+```text
+Business users / data stewards / project admins
+                |
+                | HTTP (local by default; optional LAN access)
+                v
++----------------------------------------------------------+
+| DQTool application host (Windows)                        |
+| Python 3.11+ / NiceGUI web server                        |
+| Default: 127.0.0.1:8080                                  |
+|                                                          |
+| Web UI + authentication + role checks                    |
+| Workspace/project services                               |
+| Rule execution service                                   |
+| Profiling / anomaly detection service                    |
+| In-process scheduler (approximately every minute)        |
+| Export service                                            |
+| Optional Ollama AI client                                |
++---------------------+------------------+-----------------+
+                      |                  |
+          source reads|                  | local filesystem / SQLite
+                      v                  v
+        +--------------------------+  +-------------------------+
+        | CSV / Oracle / SQL Server|  | Shared workspace folder |
+        | DB2 / Sybase ASE / IQ    |  | Workspace + projects    |
+        +--------------------------+  +-------------------------+
+                      |
+                      | optional AI HTTP API
+                      v
+              +----------------------+
+              | Ollama model service |
+              | local or remote      |
+              +----------------------+
+```
+
+## Application components
+
+| Component | Responsibility | Implementation |
+| --- | --- | --- |
+| NiceGUI web UI | Browser pages, user session, dashboards, preview, accounts, rules, results, schedules and profiling | `web_app.py` |
+| Workspace service | Users, password verification, workspace/project registration, memberships and roles | `workspace.py` |
+| Project/storage service | Project SQLite schema, migrations, and CRUD for rules, connections, groups, runs, schedules and profiles | `project.py`, `storage.py` |
+| Connector service | Tests connections, discovers targets, previews data, executes source-specific queries | `connectors.py` |
+| Execution service | Evaluates rules, persists metrics/status and writes bounded failed-row evidence | `execution.py` |
+| Profiling service | Profiles columns, detects drift/content findings, identifies possible GDPR-sensitive data and derives editable rule ideas | `profiling.py` |
+| Scheduling service | Calculates hourly/daily/weekly occurrences in Europe/Brussels time | `scheduling.py` |
+| AI service | Calls Ollama for optional explanations and recommendations | `ai.py` |
+| Export service | Produces failed-row CSV and anomaly/profile XLSX reports | `anomaly_export.py` |
+
+## Integrations
+
+| Integration | Protocol / driver | Purpose | Direction |
+| --- | --- | --- | --- |
+| Browser clients | HTTP; NiceGUI session/cookies | Access the application | Inbound |
+| CSV files | Filesystem + DuckDB | Profiling, preview and rule evaluation | Read; browser uploads write files |
+| Oracle | `oracledb` | Profiling, preview and rule execution | Read-only access recommended |
+| SQL Server | ODBC via `pyodbc` | Profiling, preview and rule execution | Read-only access recommended |
+| IBM DB2 | ODBC via `pyodbc` | Profiling, preview and rule execution | Read-only access recommended |
+| Sybase ASE | ODBC via `pyodbc` | Profiling, preview and rule execution | Read-only access recommended |
+| Sybase IQ / SQL Anywhere | ODBC via `pyodbc` | Profiling, preview and rule execution | Read-only access recommended |
+| Ollama (optional) | HTTP API | AI explanations and recommendations | Outbound |
+| Cloudflare Access (optional) | HTTP request headers and service token | Protects a remote Ollama endpoint | Outbound |
+
+Native ODBC drivers must be installed on the DQTool host for SQL Server, DB2 and Sybase. Oracle uses the Python `oracledb` driver.
+
+## Storage and data locations
+
+```text
+&lt;workspace-root&gt;/
+  dqtool_workspace.sqlite
+  &lt;project-folder&gt;/
+    dqtool_project.sqlite
+    uploads/
+    results/
+    exports/
+```
+
+| Location | Contents | Considerations |
+| --- | --- | --- |
+| `dqtool_workspace.sqlite` | Users, salted password hashes, projects, workspace/project memberships and roles | Back up with all project folders |
+| `&lt;project&gt;/dqtool_project.sqlite` | Connection definitions without passwords, rules, groups, schedules, run history and profiles | Back up with project files |
+| `&lt;project&gt;/uploads/` | CSV files uploaded through the browser; max 200 MB per file | May contain sensitive source data |
+| `&lt;project&gt;/results/` | Failed-row evidence from rule runs | May contain sensitive source data |
+| `&lt;project&gt;/exports/` | Generated CSV/XLSX reports | May contain sensitive source data |
+| Windows Credential Manager | Per-user connection passwords and optional Cloudflare AI access tokens | Local to Windows host/user; not in SQLite |
+| `%LOCALAPPDATA%\\DQTool\\settings.json` | Local application settings, including workspace selection, AI endpoint/model and session signing secret | Host-local configuration |
+| NiceGUI session storage | Browser session state, including last-opened project | Not a system of record |
+
+An important design constraint is that database passwords are stored per Windows user in Credential Manager. In a central-server deployment, the server process identity controls which local credential store is used.
+
+## Data model
+
+### Workspace level
+
+- User: username, salted PBKDF2-SHA256 password hash and workspace-admin status.
+- Project: display name and project-folder reference.
+- Membership: user-to-project assignment and project role.
+
+### Project level
+
+- Connection: source type, host, port, service/database, driver, username, JSON configuration, owner and visibility.
+- Rule: rule type, source reference, JSON configuration, owner and visibility.
+- Rule group: hierarchical group with direct rule and child-group references.
+- Schedule: target rule/group, cadence, enabled state, owner, last/next execution data.
+- Rule run: status, timestamps, row counts, runtime, executor, optional schedule ID and failed-evidence path.
+- Source profile: timestamped profile JSON keyed to source identity.
+
+Rules and connection configuration are JSON. New keys must be optional when old projects are opened, and unknown keys should be preserved during edits.
+
+## Operational flows
+
+### Interactive rule execution
+
+```text
+User browser
+  -&gt; UI checks user/project access
+  -&gt; Rule + connection read from project SQLite
+  -&gt; Password read from Windows Credential Manager
+  -&gt; Connector reads target source
+  -&gt; Execution service evaluates rule
+  -&gt; Bounded failed-row evidence optionally written to results/
+  -&gt; RuleRun persisted to project SQLite
+  -&gt; UI displays status, counts, runtime and evidence
+```
+
+Supported rules include not-null, uniqueness/duplicates, data volume, value range, regex, length, allowed values, date validity, freshness, custom SQL, referential integrity and keyed comparison. Custom SQL is authorised-user functionality and should be governed accordingly.
+
+### Profiling and anomaly detection
+
+```text
+User selects a source
+  -&gt; Profiling service reads source metadata/statistics
+  -&gt; Profile snapshot persisted in source_profiles
+  -&gt; Current snapshot compared with prior snapshot
+  -&gt; Drift, content and GDPR review findings generated
+  -&gt; User may export XLSX or review/edit suggested rules
+```
+
+Profiles include row count, data types, null/blank rates, distinct counts, min/max, averages, text lengths, frequencies, inferred meaning, and outlier/malformed-value signals. Rule ideas are advisory and never automatically saved.
+
+### Scheduled execution
+
+```text
+In-process scheduler (approximately every minute)
+  -&gt; Enumerates projects
+  -&gt; Finds enabled due schedules
+  -&gt; Resolves rule/group
+  -&gt; Executes through Execution service
+  -&gt; Stores RuleRuns with schedule_id and executed_by=scheduler
+  -&gt; Calculates and stores next occurrence
+```
+
+Schedules run hourly, daily or weekly. Daily/weekly timing uses `Europe/Brussels`; timestamps are stored in UTC. Scheduling only occurs while the DQTool process is running.
+
+### Optional AI flow
+
+```text
+Profile/anomaly metadata
+  -&gt; AI prompt builder
+  -&gt; Ollama HTTP endpoint
+  -&gt; Explanation, rule priorities and operational recommendations
+  -&gt; UI presentation only
+```
+
+The default AI configuration is Ollama model `qwen3:8b` at `http://localhost:11434`. The endpoint and model are configurable. The normal AI flows send profile statistics, drift findings, GDPR categories and deterministic rule ideas, not source rows, sampled values or finding messages. AI is optional and does not run, save or schedule rules. A separate opt-in path can send sample values and requires explicit data-governance review.
+
+## Security architecture
+
+- Local DQTool authentication; no built-in corporate SSO, LDAP, SAML or OIDC integration.
+- Application passwords are salted PBKDF2-SHA256 hashes.
+- Roles: Workspace Admin, Project Admin and Project User.
+- Project objects support `private`, `shared` and specific-user sharing scopes.
+- Database passwords and Cloudflare AI tokens are held in Windows Credential Manager, not SQLite or Git.
+- Default bind address is `127.0.0.1`; LAN hosting requires explicit host configuration and a Windows Firewall rule.
+- The application should not be publicly exposed over HTTP.
+- Use read-only source database accounts wherever possible.
+- Uploaded CSVs, failed-row evidence and exports can hold sensitive data; apply filesystem ACLs, retention, backup and secure-disposal controls.
+
+## Deployment and configuration
+
+### Current deployment model
+
+- Windows host.
+- Python 3.11+ and the DQTool dependencies, or a packaged equivalent.
+- One application process hosting UI and scheduler.
+- A shared workspace folder available to the application process identity.
+- Network reachability to browser clients, source databases and optionally Ollama.
+- Native ODBC drivers installed for relevant database types.
+
+| Setting | Default / behaviour |
+| --- | --- |
+| `DQTOOL_HOST` | `127.0.0.1`; set `0.0.0.0` for LAN access |
+| `DQTOOL_PORT` | `8080` unless overridden |
+| Workspace folder | Selected in application setup and stored locally |
+| AI endpoint | `http://localhost:11434` by default |
+| AI model | `qwen3:8b` by default |
+| Schedule timezone | `Europe/Brussels` |
+| Persisted timestamps | UTC |
+
+## Constraints and enterprise considerations
+
+- UI, scheduling, profiling and execution share one process.
+- There is no message broker, queue, worker pool, API gateway, load balancer or independent scheduler component.
+- SQLite is appropriate for a smaller shared/team deployment but should be assessed for concurrent writes, network-share locking, backup consistency and high availability.
+- Horizontal scaling is not currently suitable: local credential storage, in-process scheduling and SQLite state create node affinity and duplicate-execution risks.
+- For unattended scheduling, run the application as a managed Windows service or equivalent always-on process.
+- The current design does not include built-in disaster recovery, central monitoring/alerting or SIEM/audit integration.
+
+## Diagrams to create
+
+1. **System context diagram:** users, DQTool, source databases/files, Ollama, Windows Credential Manager and shared workspace storage.
+2. **Container diagram:** single Python/NiceGUI process and its UI, workspace, connector, execution, profiling, scheduler, export and AI components.
+3. **Deployment diagram:** Windows application host, workspace filesystem/SMB location, Credential Manager, ODBC drivers, local/remote Ollama, database network zones, browser clients and firewall boundaries.
+4. **Data-flow diagram:** rule execution, profiling/anomaly processing, scheduled execution, CSV upload and AI metadata flow.
+5. **Security/trust-boundary diagram:** browser/LAN, application host, workspace filesystem, credential store, source-data zone and optional AI endpoint; mark sensitive flows for credentials, CSV uploads, failed rows, exports and opt-in AI sample values.
+
+## Decisions for enterprise architecture
+
+- Confirm whether DQTool is a local tool, departmental central server or enterprise platform.
+- Decide whether to replace local authentication with OIDC/SAML/Active Directory.
+- Decide whether secrets should move from Credential Manager to an enterprise vault.
+- Assess replacing SQLite with a managed shared database for concurrency, audit, backup and high availability.
+- Decide whether a shared filesystem is appropriate for uploads/results/exports, or whether object/document storage is required.
+- Decide whether the in-process scheduler must be replaced with a durable enterprise job runner.
+- Confirm whether AI metadata may leave the application trust boundary and define the approved model endpoint.
+- Define retention, encryption, malware scanning, DLP and access-control controls for uploaded files, evidence and exports.
+- Define authorisation, database identities, timeouts, audit controls and allowed-query policy for custom SQL.
+
+</pre></section>
+<script>
+(() => {
+  const source = document.getElementById('brief-source').textContent.replace(/^\s*\n/, '');
+  const target = document.getElementById('brief-rendered');
+  const escapeHtml = value => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const inline = value => escapeHtml(value)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  const lines = source.split(/\r?\n/);
+  let html = '';
+  let paragraph = [];
+  const flushParagraph = () => {
+    if (paragraph.length) {
+      html += `<p>${inline(paragraph.join(' '))}</p>`;
+      paragraph = [];
+    }
+  };
+  for (let i = 0; i < lines.length;) {
+    const line = lines[i];
+    if (/^```/.test(line)) {
+      flushParagraph();
+      const block = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) block.push(lines[i++]);
+      i++;
+      const content = block.join('\n');
+      if (/DQTool application host|User browser|In-process scheduler|Profile\/anomaly metadata/.test(content)) {
+        html += '<div class="diagram-reference"><strong>Visualized above.</strong> See the corresponding system or service-flow diagram in the visual architecture section.</div>';
+      } else {
+        html += `<div class="storage-tree">${escapeHtml(content)}</div>`;
+      }
+      continue;
+    }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      const level = heading[1].length;
+      html += `<h${level}>${inline(heading[2])}</h${level}>`;
+      i++;
+      continue;
+    }
+    if (/^\|/.test(line) && i + 1 < lines.length && /^\|[\s|:-]+\|?$/.test(lines[i + 1])) {
+      flushParagraph();
+      const headers = line.replace(/^\||\|$/g, '').split('|').map(value => value.trim());
+      i += 2;
+      const rows = [];
+      while (i < lines.length && /^\|/.test(lines[i])) {
+        rows.push(lines[i].replace(/^\||\|$/g, '').split('|').map(value => value.trim()));
+        i++;
+      }
+      html += '<table><thead><tr>' + headers.map(value => `<th>${inline(value)}</th>`).join('') + '</tr></thead><tbody>' + rows.map(row => '<tr>' + row.map(value => `<td>${inline(value)}</td>`).join('') + '</tr>').join('') + '</tbody></table>';
+      continue;
+    }
+    if (/^- /.test(line)) {
+      flushParagraph();
+      const items = [];
+      while (i < lines.length && /^- /.test(lines[i])) items.push(lines[i++].slice(2));
+      html += '<ul>' + items.map(value => `<li>${inline(value)}</li>`).join('') + '</ul>';
+      continue;
+    }
+    if (/^\d+\. /.test(line)) {
+      flushParagraph();
+      const items = [];
+      while (i < lines.length && /^\d+\. /.test(lines[i])) items.push(lines[i++].replace(/^\d+\. /, ''));
+      html += '<ol>' + items.map(value => `<li>${inline(value)}</li>`).join('') + '</ol>';
+      continue;
+    }
+    if (!line.trim()) {
+      flushParagraph();
+      i++;
+      continue;
+    }
+    paragraph.push(line.trim());
+    i++;
+  }
+  flushParagraph();
+  target.innerHTML = html;
+})();
+</script>
+</body>
+</html>

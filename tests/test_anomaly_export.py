@@ -54,3 +54,21 @@ class AnomalyExportTests(unittest.TestCase):
 
         self.assertEqual(("status", "active", 8, 0.8), rows[1])
         self.assertEqual(("status", "inactive", 2, 0.2), rows[2])
+
+    def test_workbook_removes_excel_illegal_control_characters(self) -> None:
+        report = build_anomaly_report_workbook(
+            "products",
+            {
+                "row_count": 1,
+                "columns": {
+                    "description": {
+                        "frequency_values": [{"value": "ande\x0b de buf 150g", "count": 1, "share": 1.0}]
+                    }
+                },
+            },
+            [],
+        )
+
+        workbook = load_workbook(BytesIO(report), data_only=True)
+
+        self.assertEqual("ande de buf 150g", workbook["Value frequencies"]["B2"].value)

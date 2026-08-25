@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Callable
 from datetime import date, datetime
 from typing import Any
 
@@ -11,6 +12,7 @@ from dqtool.models.entities import Connection, ConnectionType, RuleType, utc_now
 from dqtool.services.connectors import ConnectorService
 
 PROFILE_AGGREGATE_BATCH_SIZE = 8
+ProgressCallback = Callable[[float, str], None]
 
 ROW_COUNT_HIGH = 0.30
 ROW_COUNT_MEDIUM = 0.10
@@ -65,21 +67,26 @@ class ProfilingService:
         self,
         source_config: dict[str, Any],
         connections: dict[int, Connection],
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
+        self._report_progress(progress_callback, 0.02, "Opening source")
         connection = connections[int(source_config["source_connection_id"])]
         if connection.connection_type == ConnectionType.CSV:
-            return self._profile_duckdb(source_config, connections)
-        return self._profile_oracle(source_config, connection)
+            return self._profile_duckdb(source_config, connections, progress_callback)
+        return self._profile_oracle(source_config, connection, progress_callback)
 
     def _profile_duckdb(
         self,
         source_config: dict[str, Any],
         connections: dict[int, Connection],
+        progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         con = duckdb.connect()
         try:
             relation = self.connector_service.build_rule_source_relation(con, source_config, connections)
             con.sql(f"CREATE OR REPLACE VIEW profile_view AS {relation.sql_query()}")
+            self._report_progress(progress_callback, 0.10, "Reading schema and row count")
             summary = con.execute("SUMMARIZE SELECT * FROM profile_view").fetchall()
             summary_columns = [column[0] for column in con.execute("SUMMARIZE SELECT * FROM profile_view").description]
             index = {name: position for position, name in enumerate(summary_columns)}
@@ -87,6 +94,7 @@ class ProfilingService:
             total_column_count = len(summary)
             columns: dict[str, dict[str, Any]] = {}
             numeric_quartiles: list[tuple[str, float, float]] = []
+            self._report_progress(progress_callback, 0.22, "Calculating column statistics")
             for row in summary:
                 name = row[index["column_name"]]
                 null_percentage = row[index["null_percentage"]]
@@ -114,11 +122,18 @@ class ProfilingService:
                     columns[name]["non_null_count"] = int(next(values) or 0)
                     distinct = next(values)
                     columns[name]["distinct_count"] = int(distinct or 0)
-            findings = self._content_findings_duckdb(con, columns, numeric_quartiles, int(row_count))
-            self._add_duckdb_frequency_analysis(con, columns, int(row_count), findings)
+            self._report_progress(progress_callback, 0.35, "Inspecting column contents")
+            findings = self._content_findings_duckdb(
+                con, columns, numeric_quartiles, int(row_count), progress_callback=progress_callback
+            )
+            self._add_duckdb_frequency_analysis(
+                con, columns, int(row_count), findings, progress_callback=progress_callback
+            )
             privacy_findings = gdpr_risk_findings(columns)
-            privacy_findings.extend(self._privacy_value_findings_duckdb(con, columns))
-            return {
+            privacy_findings.extend(
+                self._privacy_value_findings_duckdb(con, columns, progress_callback=progress_callback)
+            )
+            profile = {
                 "profiled_at": utc_now(),
                 "row_count": int(row_count),
                 "columns": columns,
@@ -127,16 +142,27 @@ class ProfilingService:
                 "content_findings": findings,
                 "gdpr_findings": _deduplicate_gdpr_findings(privacy_findings),
             }
+            self._report_progress(progress_callback, 1.0, "Profile complete")
+            return profile
         finally:
             con.close()
 
     def _add_duckdb_frequency_analysis(
-        self, con: duckdb.DuckDBPyConnection, columns: dict[str, dict[str, Any]], row_count: int, findings: list[dict[str, Any]]
+        self,
+        con: duckdb.DuckDBPyConnection,
+        columns: dict[str, dict[str, Any]],
+        row_count: int,
+        findings: list[dict[str, Any]],
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> None:
-        for name, stats in columns.items():
+        total = max(1, len(columns))
+        for index, (name, stats) in enumerate(columns.items(), start=1):
             if not str(stats.get("type") or "").upper().startswith("VARCHAR"):
+                self._report_progress(progress_callback, 0.62 + 0.16 * index / total, f"Frequency analysis: {name}")
                 continue
             if not 0 < int(stats.get("distinct_count") or 0) <= FREQUENCY_DISTINCT_LIMIT:
+                self._report_progress(progress_callback, 0.62 + 0.16 * index / total, f"Frequency analysis: {name}")
                 continue
             quoted = '"' + name.replace('"', '""') + '"'
             rows = con.execute(
@@ -146,6 +172,7 @@ class ProfilingService:
             stats["frequency_values"] = _frequency_rows(rows, row_count)
             stats["top_values"] = stats["frequency_values"][:MAX_FREQUENCY_VALUES]
             findings.extend(_placeholder_findings(name, stats["top_values"]))
+            self._report_progress(progress_callback, 0.62 + 0.16 * index / total, f"Frequency analysis: {name}")
 
     def _content_findings_duckdb(
         self,
@@ -153,11 +180,17 @@ class ProfilingService:
         columns: dict[str, dict[str, Any]],
         numeric_quartiles: list[tuple[str, float, float]],
         row_count: int,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> list[dict[str, Any]]:
         """Flag odd values inside the current snapshot: mixed types, malformed emails, outliers."""
         findings: list[dict[str, Any]] = []
+        total = max(1, len(columns) + len(numeric_quartiles))
+        completed = 0
         for name, stats in columns.items():
+            completed += 1
             if not str(stats.get("type", "")).upper().startswith("VARCHAR"):
+                self._report_progress(progress_callback, 0.35 + 0.27 * completed / total, f"Content analysis: {name}")
                 continue
             quoted = '"' + name.replace('"', '""') + '"'
             non_null, blank_count, text_min, text_max, numeric, email_loose, email_strict, date_like = con.execute(
@@ -171,6 +204,7 @@ class ProfilingService:
                 f"FROM profile_view"
             ).fetchone()
             if not non_null:
+                self._report_progress(progress_callback, 0.35 + 0.27 * completed / total, f"Content analysis: {name}")
                 continue
             stats["blank_count"] = int(blank_count or 0)
             stats["blank_rate"] = round(int(blank_count or 0) / row_count, 6) if row_count else 0.0
@@ -236,9 +270,12 @@ class ProfilingService:
                 findings.append(
                     _finding("medium", name, f"{non_numeric} non-numeric value(s) in a mostly numeric column, e.g. {examples}.")
                 )
+            self._report_progress(progress_callback, 0.35 + 0.27 * completed / total, f"Content analysis: {name}")
         for name, q25, q75 in numeric_quartiles:
+            completed += 1
             iqr = q75 - q25
             if iqr <= 0:
+                self._report_progress(progress_callback, 0.35 + 0.27 * completed / total, f"Outlier analysis: {name}")
                 continue
             low_fence = q25 - OUTLIER_FENCE_MULTIPLIER * iqr
             high_fence = q75 + OUTLIER_FENCE_MULTIPLIER * iqr
@@ -254,6 +291,7 @@ class ProfilingService:
                         f"{count} numeric outlier(s) outside [{low_fence:.4g}, {high_fence:.4g}], e.g. {examples}.",
                     )
                 )
+            self._report_progress(progress_callback, 0.35 + 0.27 * completed / total, f"Outlier analysis: {name}")
         return findings
 
     def _example_values(self, con: duckdb.DuckDBPyConnection, quoted: str, condition: str) -> str:
@@ -277,7 +315,11 @@ class ProfilingService:
         return [str(row[0]) for row in rows]
 
     def _privacy_value_findings_duckdb(
-        self, con: duckdb.DuckDBPyConnection, columns: dict[str, dict[str, Any]]
+        self,
+        con: duckdb.DuckDBPyConnection,
+        columns: dict[str, dict[str, Any]],
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> list[dict[str, Any]]:
         """Find high-confidence identifier shapes without returning their values to the UI."""
         findings: list[dict[str, Any]] = []
@@ -287,8 +329,10 @@ class ProfilingService:
             ("Personal data: Belgian national-register-number-like identifier", "high", "^[0-9]{2}\\.[0-9]{2}\\.[0-9]{2}-[0-9]{3}\\.[0-9]{2}$"),
             ("Personal data: IP address", "medium", "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$"),
         )
-        for name, stats in columns.items():
+        total = max(1, len(columns))
+        for index, (name, stats) in enumerate(columns.items(), start=1):
             if not str(stats.get("type", "")).upper().startswith("VARCHAR"):
+                self._report_progress(progress_callback, 0.78 + 0.19 * index / total, f"Privacy review: {name}")
                 continue
             quoted = '"' + name.replace('"', '""') + '"'
             for category, severity, pattern in patterns:
@@ -301,10 +345,17 @@ class ProfilingService:
                             severity, name, category, f"{count} value(s) match a protected identifier pattern; values are not shown."
                         )
                     )
+            self._report_progress(progress_callback, 0.78 + 0.19 * index / total, f"Privacy review: {name}")
         return findings
 
-    def _profile_oracle(self, source_config: dict[str, Any], connection: Connection) -> dict[str, Any]:
+    def _profile_oracle(
+        self,
+        source_config: dict[str, Any],
+        connection: Connection,
+        progress_callback: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
         sql = self.connector_service.rule_source_sql(source_config)
+        self._report_progress(progress_callback, 0.05, "Connecting to database")
         db_conn = self.connector_service.connect_database(connection)
         numeric_markers = ("NUMBER", "FLOAT", "DECIMAL", "NUMERIC", "INT", "DOUBLE", "REAL")
         date_markers = ("DATE", "TIME")
@@ -312,6 +363,7 @@ class ProfilingService:
         stddev_function = "STDEV" if self.connector_service.database_dialect(connection) == "sqlserver" else "STDDEV"
         try:
             with db_conn.cursor() as cursor:
+                self._report_progress(progress_callback, 0.10, "Reading schema")
                 cursor.execute(self.connector_service.describe_sql(sql))
                 all_described = cursor.description
                 described = all_described
@@ -334,8 +386,11 @@ class ProfilingService:
                 }
                 cursor.execute(f"SELECT COUNT(*) FROM ({sql}) q")
                 row_count = int(cursor.fetchone()[0])
+            self._report_progress(progress_callback, 0.18, "Calculating column statistics")
             columns: dict[str, dict[str, Any]] = {}
-            for start in range(0, len(described), PROFILE_AGGREGATE_BATCH_SIZE):
+            batches = list(range(0, len(described), PROFILE_AGGREGATE_BATCH_SIZE))
+            total_batches = max(1, len(batches))
+            for batch_index, start in enumerate(batches, start=1):
                 batch = described[start : start + PROFILE_AGGREGATE_BATCH_SIZE]
                 aggregates: list[str] = []
                 for item in batch:
@@ -386,14 +441,31 @@ class ProfilingService:
                         stats["blank_count"] = blank_count
                         stats["blank_rate"] = round(blank_count / row_count, 6) if row_count else 0.0
                     columns[item[0]] = stats
+                self._report_progress(
+                    progress_callback,
+                    0.18 + 0.37 * batch_index / total_batches,
+                    f"Column statistics: batch {batch_index}/{total_batches}",
+                )
+            self._report_progress(progress_callback, 0.58, "Inferring text types")
             self._infer_database_text_stats(cursor, sql, text_names, columns)
+            self._report_progress(progress_callback, 0.72, "Analyzing value frequencies")
             content_findings = [
                 _finding("medium", name, f"{stats['blank_count']} value(s) are blank or contain spaces only.")
                 for name, stats in columns.items()
                 if stats.get("blank_count")
             ]
-            self._add_database_frequency_analysis(cursor, sql, connection, text_names, columns, row_count, content_findings)
-            return {
+            self._add_database_frequency_analysis(
+                cursor,
+                sql,
+                connection,
+                text_names,
+                columns,
+                row_count,
+                content_findings,
+                progress_callback=progress_callback,
+            )
+            self._report_progress(progress_callback, 0.97, "Finalizing privacy review")
+            profile = {
                 "profiled_at": utc_now(),
                 "row_count": row_count,
                 "columns": columns,
@@ -402,17 +474,23 @@ class ProfilingService:
                 "content_findings": content_findings,
                 "gdpr_findings": gdpr_risk_findings(columns),
             }
+            self._report_progress(progress_callback, 1.0, "Profile complete")
+            return profile
         finally:
             db_conn.close()
 
     def _add_database_frequency_analysis(
         self, cursor: Any, sql: str, connection: Connection, text_names: set[str], columns: dict[str, dict[str, Any]],
         row_count: int, findings: list[dict[str, Any]],
+        *, progress_callback: ProgressCallback | None = None,
     ) -> None:
         dialect = self.connector_service.database_dialect(connection)
-        for name in sorted(text_names):
+        names = sorted(text_names)
+        total = max(1, len(names))
+        for index, name in enumerate(names, start=1):
             stats = columns[name]
             if not 0 < int(stats.get("distinct_count") or 0) <= FREQUENCY_DISTINCT_LIMIT:
+                self._report_progress(progress_callback, 0.72 + 0.23 * index / total, f"Frequency analysis: {name}")
                 continue
             quoted = '"' + name.replace('"', '""') + '"'
             value = f"NULLIF(TRIM(q.{quoted}), '')"
@@ -424,6 +502,7 @@ class ProfilingService:
             stats["frequency_values"] = _frequency_rows(cursor.fetchall(), row_count)
             stats["top_values"] = stats["frequency_values"][:MAX_FREQUENCY_VALUES]
             findings.extend(_placeholder_findings(name, stats["top_values"]))
+            self._report_progress(progress_callback, 0.72 + 0.23 * index / total, f"Frequency analysis: {name}")
 
     def _infer_database_text_stats(
         self, cursor: Any, sql: str, text_names: set[str], columns: dict[str, dict[str, Any]]
@@ -493,6 +572,11 @@ class ProfilingService:
             return None if value is None else float(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _report_progress(callback: ProgressCallback | None, value: float, stage: str) -> None:
+        if callback is not None:
+            callback(max(0.0, min(1.0, value)), stage)
 
     def _inferred_type(self, database_type: str) -> str:
         value = database_type.upper()

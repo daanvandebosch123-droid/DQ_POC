@@ -12,7 +12,13 @@ from dqtool.models.entities import Connection, ConnectionType, RuleType, utc_now
 from dqtool.services.connectors import ConnectorService
 
 PROFILE_AGGREGATE_BATCH_SIZE = 8
+TEXT_INFERENCE_SAMPLE_LIMIT = 50_000
 ProgressCallback = Callable[[float, str], None]
+AbortCallback = Callable[[], bool]
+
+
+class ProfileAborted(RuntimeError):
+    """Raised when a caller asks a long-running profile to stop safely."""
 
 ROW_COUNT_HIGH = 0.30
 ROW_COUNT_MEDIUM = 0.10
@@ -69,12 +75,23 @@ class ProfilingService:
         connections: dict[int, Connection],
         *,
         progress_callback: ProgressCallback | None = None,
+        text_inference_limit: int | None = TEXT_INFERENCE_SAMPLE_LIMIT,
+        should_abort: AbortCallback | None = None,
     ) -> dict[str, Any]:
+        self._raise_if_aborted(should_abort)
         self._report_progress(progress_callback, 0.02, "Opening source")
         connection = connections[int(source_config["source_connection_id"])]
         if connection.connection_type == ConnectionType.CSV:
-            return self._profile_duckdb(source_config, connections, progress_callback)
-        return self._profile_oracle(source_config, connection, progress_callback)
+            profile = self._profile_duckdb(source_config, connections, progress_callback)
+            self._raise_if_aborted(should_abort)
+            return profile
+        return self._profile_oracle(
+            source_config,
+            connection,
+            progress_callback,
+            text_inference_limit=text_inference_limit,
+            should_abort=should_abort,
+        )
 
     def _profile_duckdb(
         self,
@@ -353,7 +370,11 @@ class ProfilingService:
         source_config: dict[str, Any],
         connection: Connection,
         progress_callback: ProgressCallback | None = None,
+        *,
+        text_inference_limit: int | None = TEXT_INFERENCE_SAMPLE_LIMIT,
+        should_abort: AbortCallback | None = None,
     ) -> dict[str, Any]:
+        self._raise_if_aborted(should_abort)
         sql = self.connector_service.rule_source_sql(source_config)
         self._report_progress(progress_callback, 0.05, "Connecting to database")
         db_conn = self.connector_service.connect_database(connection)
@@ -386,11 +407,13 @@ class ProfilingService:
                 }
                 cursor.execute(f"SELECT COUNT(*) FROM ({sql}) q")
                 row_count = int(cursor.fetchone()[0])
+            self._raise_if_aborted(should_abort)
             self._report_progress(progress_callback, 0.18, "Calculating column statistics")
             columns: dict[str, dict[str, Any]] = {}
             batches = list(range(0, len(described), PROFILE_AGGREGATE_BATCH_SIZE))
             total_batches = max(1, len(batches))
             for batch_index, start in enumerate(batches, start=1):
+                self._raise_if_aborted(should_abort)
                 batch = described[start : start + PROFILE_AGGREGATE_BATCH_SIZE]
                 aggregates: list[str] = []
                 for item in batch:
@@ -446,8 +469,19 @@ class ProfilingService:
                     0.18 + 0.37 * batch_index / total_batches,
                     f"Column statistics: batch {batch_index}/{total_batches}",
                 )
-            self._report_progress(progress_callback, 0.58, "Inferring text types")
-            self._infer_database_text_stats(cursor, sql, text_names, columns)
+                self._raise_if_aborted(should_abort)
+            inference_rows = self._infer_database_text_stats(
+                cursor,
+                sql,
+                connection,
+                text_names,
+                columns,
+                row_count,
+                sample_limit=text_inference_limit,
+                progress_callback=progress_callback,
+                should_abort=should_abort,
+            )
+            self._raise_if_aborted(should_abort)
             self._report_progress(progress_callback, 0.72, "Analyzing value frequencies")
             content_findings = [
                 _finding("medium", name, f"{stats['blank_count']} value(s) are blank or contain spaces only.")
@@ -464,6 +498,7 @@ class ProfilingService:
                 content_findings,
                 progress_callback=progress_callback,
             )
+            self._raise_if_aborted(should_abort)
             self._report_progress(progress_callback, 0.97, "Finalizing privacy review")
             profile = {
                 "profiled_at": utc_now(),
@@ -471,6 +506,9 @@ class ProfilingService:
                 "columns": columns,
                 "total_column_count": len(all_described),
                 "profile_limit_reached": False,
+                "text_inference_rows": inference_rows,
+                "text_inference_sample_limit": text_inference_limit,
+                "text_inference_sampled": bool(text_names and inference_rows < row_count),
                 "content_findings": content_findings,
                 "gdpr_findings": gdpr_risk_findings(columns),
             }
@@ -505,17 +543,50 @@ class ProfilingService:
             self._report_progress(progress_callback, 0.72 + 0.23 * index / total, f"Frequency analysis: {name}")
 
     def _infer_database_text_stats(
-        self, cursor: Any, sql: str, text_names: set[str], columns: dict[str, dict[str, Any]]
-    ) -> None:
-        """Infer numeric and date-like text without relying on vendor-specific safe casts."""
+        self,
+        cursor: Any,
+        sql: str,
+        connection: Connection,
+        text_names: set[str],
+        columns: dict[str, dict[str, Any]],
+        row_count: int,
+        *,
+        sample_limit: int | None,
+        progress_callback: ProgressCallback | None = None,
+        should_abort: AbortCallback | None = None,
+    ) -> int:
+        """Infer text meaning incrementally, with an optional bounded row sample."""
         if not text_names:
-            return
+            self._report_progress(progress_callback, 0.70, "No text columns to infer")
+            return 0
         names = sorted(text_names)
         quoted_names = ['"' + name.replace('"', '""') + '"' for name in names]
-        cursor.execute(f"SELECT {', '.join(quoted_names)} FROM ({sql}) q")
-        numeric: dict[str, list[float]] = {name: [] for name in names}
-        dates: dict[str, list[date]] = {name: [] for name in names}
+        inference_sql = f"SELECT {', '.join(quoted_names)} FROM ({sql}) q"
+        if sample_limit is not None:
+            inference_sql = self.connector_service.limited_sql(
+                inference_sql,
+                max(1, int(sample_limit)),
+                self.connector_service.database_dialect(connection),
+            )
+        cursor.execute(inference_sql)
+        sample_non_empty = {name: 0 for name in names}
+        numeric_count = {name: 0 for name in names}
+        numeric_sum = {name: 0.0 for name in names}
+        numeric_min: dict[str, float | None] = {name: None for name in names}
+        numeric_max: dict[str, float | None] = {name: None for name in names}
+        date_count = {name: 0 for name in names}
+        date_min: dict[str, date | None] = {name: None for name in names}
+        date_max: dict[str, date | None] = {name: None for name in names}
+        expected_rows = row_count if sample_limit is None else min(row_count, max(1, int(sample_limit)))
+        rows_read = 0
+        self._report_progress(
+            progress_callback,
+            0.58,
+            f"Inferring text types: 0/{expected_rows:,} rows" + (" (full scan)" if sample_limit is None else ""),
+        )
         while rows := cursor.fetchmany(1000):
+            self._raise_if_aborted(should_abort)
+            rows_read += len(rows)
             for row in rows:
                 for name, value in zip(names, row, strict=True):
                     if value is None:
@@ -523,28 +594,46 @@ class ProfilingService:
                     text = str(value).strip()
                     if not text:
                         continue
+                    sample_non_empty[name] += 1
                     number = self._numeric_text_value(text)
                     if number is not None:
-                        numeric[name].append(number)
+                        numeric_count[name] += 1
+                        numeric_sum[name] += number
+                        numeric_min[name] = number if numeric_min[name] is None else min(numeric_min[name], number)
+                        numeric_max[name] = number if numeric_max[name] is None else max(numeric_max[name], number)
                     parsed_date = self._date_text_value(text)
                     if parsed_date is not None:
-                        dates[name].append(parsed_date)
+                        date_count[name] += 1
+                        date_min[name] = parsed_date if date_min[name] is None else min(date_min[name], parsed_date)
+                        date_max[name] = parsed_date if date_max[name] is None else max(date_max[name], parsed_date)
+            fraction = min(1.0, rows_read / expected_rows) if expected_rows else 1.0
+            scope = f"{rows_read:,}/{expected_rows:,} rows" + (" (full scan)" if sample_limit is None else "")
+            self._report_progress(progress_callback, 0.58 + 0.12 * fraction, f"Inferring text types: {scope}")
+        self._raise_if_aborted(should_abort)
+        sampled = rows_read < row_count
         for name in names:
             stats = columns[name]
-            non_null = int(stats.get("non_null_count") or 0)
-            if not non_null:
+            sample_size = sample_non_empty[name]
+            stats["inference_rows_scanned"] = rows_read
+            stats["inference_sample_size"] = sample_size
+            stats["inference_sampled"] = sampled
+            if not sample_size:
+                stats["inference_confidence"] = None
                 continue
-            if len(dates[name]) / non_null >= DOMINANT_SHARE:
-                values = dates[name]
+            date_share = date_count[name] / sample_size
+            numeric_share = numeric_count[name] / sample_size
+            stats["inference_confidence"] = round(max(date_share, numeric_share), 6)
+            if date_share >= DOMINANT_SHARE:
                 stats["inferred_type"] = "date/time"
-                stats["min"] = min(values).isoformat()
-                stats["max"] = max(values).isoformat()
-            elif len(numeric[name]) / non_null >= DOMINANT_SHARE:
-                values = numeric[name]
+                stats["min"] = date_min[name].isoformat() if date_min[name] is not None else None
+                stats["max"] = date_max[name].isoformat() if date_max[name] is not None else None
+            elif numeric_share >= DOMINANT_SHARE:
                 stats["inferred_type"] = "numeric text"
-                stats["min"] = min(values)
-                stats["max"] = max(values)
-                stats["mean"] = sum(values) / len(values)
+                stats["min"] = numeric_min[name]
+                stats["max"] = numeric_max[name]
+                stats["mean"] = numeric_sum[name] / numeric_count[name]
+        self._report_progress(progress_callback, 0.70, f"Text inference complete: {rows_read:,} rows scanned")
+        return rows_read
 
     @staticmethod
     def _numeric_text_value(value: str) -> float | None:
@@ -572,6 +661,11 @@ class ProfilingService:
             return None if value is None else float(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _raise_if_aborted(should_abort: AbortCallback | None) -> None:
+        if should_abort is not None and should_abort():
+            raise ProfileAborted("Anomaly check aborted by user.")
 
     @staticmethod
     def _report_progress(callback: ProgressCallback | None, value: float, stage: str) -> None:

@@ -95,7 +95,7 @@ CSV uploads are copied into the project's `uploads` directory. The picker is res
 
 ### Schema migrations
 
-`StorageService` creates missing tables and applies additive migrations when a project opens. Existing migrations add rule descriptions, nested group membership, `schedule_id` and `runtime_ms` to rule-run history. Back up project databases before manual modification.
+`StorageService` creates missing tables and applies additive migrations when a project opens. Existing migrations add rule descriptions, nested group membership, `schedule_id` and `runtime_ms` to rule-run history. A `RuleGroup` may have no direct rules or subgroups, allowing users to create an empty organisational group before its checks exist. Back up project databases before manual modification.
 
 ## Core model
 
@@ -242,7 +242,9 @@ The Schedules page builds execution statistics from `RuleRun` records associated
 
 `ProfilingService` collects source metadata and statistics for every source column, persists them as `SourceProfile` records, and supports drift/anomaly comparisons. **SQL Null %** counts actual database `NULL` values; **Blank %** separately counts text values that are empty after trimming spaces. The completeness chart combines those non-overlapping measures as **Missing or blank %**. The table's **Distinct %** is `distinct non-null values / non-null values`, not a measure of values that occur exactly once. Text min/max are displayed in alphabetical/lexicographic order; detected dates are converted before min/max is calculated, so their range is chronological.
 
-The Anomalies page accepts multiple files/tables from one connection. It profiles at most three sources concurrently through independent I/O-bound tasks, while profile snapshot reads/writes are processed as tasks finish to avoid unnecessary SQLite write contention. A failure for one source does not cancel the remaining profiles. The batch results table exposes per-source status and determinate progress based on actual profiler phases: source setup, schema/row count, column aggregates, content/frequency analysis, privacy review, and finalization. It shows the active stage plus percentage complete/remaining and lets the user open a completed source's normal report, history, export, suggestions, and AI actions.
+For database sources, exact full-source SQL aggregates still calculate row counts, null/blank rates, distinct counts, and statistics for native numeric/date columns. Text-backed numeric/date inference is a separate Python phase. By default its query is limited with the connector's dialect-specific syntax to `TEXT_INFERENCE_SAMPLE_LIMIT = 50_000` rows. Processing is incremental in 1,000-row fetch batches and retains only per-column counts, sums, and extrema, so memory does not grow with the number of scanned rows. Inference uses non-empty sampled values as its denominator and records `inference_rows_scanned`, `inference_sample_size`, `inference_confidence`, and `inference_sampled` for each text column. The profile also records the applied limit and total inference rows. The UI labels sample-derived numeric/date min, max, and mean values and exposes **Deep text scan**, which passes no limit and scans the full database result. The bounded query is not guaranteed to be statistically random; use the deep scan where ordering or rare values could materially affect the classification. CSV profiling is unchanged.
+
+The Anomalies page accepts multiple files/tables from one connection. It profiles at most three sources concurrently through independent I/O-bound tasks, while profile snapshot reads/writes are processed as tasks finish to avoid unnecessary SQLite write contention. A failure for one source does not cancel the remaining profiles. **Abort** sets a per-batch thread-safe cancellation event: queued tasks are never started, active profilers check it at safe phase boundaries (and every 1,000 text-inference rows), and an aborted profile is never persisted as a snapshot. A database query already executing is allowed to return before cancellation is observed, so the UI shows **Stopping** until then. The batch results table exposes per-source status and determinate progress based on actual profiler phases: source setup, schema/row count, column aggregates, content/frequency analysis, privacy review, and finalization. It shows the active stage plus percentage complete/remaining and lets the user open a completed source's normal report, history, export, suggestions, and AI actions.
 
 For CSV sources it also infers a practical column meaning (for example number, date/time, email or small category), captures a complete value list only for low-cardinality categories, and builds **editable** starter-rule suggestions. Suggestions cover not-null, unique, duplicate, date-validity, regex/email, numeric-range, text-length, and allowed-value checks when the observed data supports them. Identifier inference recognises common Dutch business names such as `klantnummer`, `artikelnummer`, and `ordernummer`, plus suffixes including `nummer`, `nr`, `code` and `sleutel`.
 
@@ -546,7 +548,10 @@ connect through the SAP ODBC tool.
 
 Rule groups are nested. Their storage contract uses direct rule IDs plus child
 group IDs. The UI resolves nested membership to display a group as one logical
-set.
+set. The Move to group action supports both rules and groups; a group move adds
+the selected group as a direct child of its destination and removes editable
+previous parent memberships in the same transaction. Destinations that would
+create a self-reference or transitive cycle are rejected.
 
 When changing group behaviour:
 

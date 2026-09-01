@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 from dqtool.models.entities import Connection, ConnectionType
 from dqtool.services.connectors import ConnectorService
 from dqtool.services.profiling import (
+    TEXT_INFERENCE_SAMPLE_LIMIT,
+    ProfileAborted,
     ProfilingService,
     _placeholder_findings,
     detect_anomalies,
@@ -67,6 +69,10 @@ class ProfilingServiceTests(unittest.TestCase):
         self.assertEqual(1.0, updates[-1][0])
         self.assertEqual("Profile complete", updates[-1][1])
         self.assertEqual(sorted(value for value, _stage in updates), [value for value, _stage in updates])
+
+    def test_profile_stops_before_opening_source_when_abort_is_requested(self) -> None:
+        with self.assertRaises(ProfileAborted):
+            self.service.profile_rule_source(self.source_config, {11: self.connection}, should_abort=lambda: True)
 
     def test_placeholder_detection_flags_masked_values(self) -> None:
         findings = _placeholder_findings("status", [{"value": "***", "count": 9, "share": 0.9}])
@@ -153,6 +159,49 @@ class ProfilingServiceTests(unittest.TestCase):
         self.assertEqual("date/time", profile["columns"]["loaded_at"]["inferred_type"])
         self.assertEqual("2026-01-01", profile["columns"]["loaded_at"]["min"])
         self.assertEqual("2026-02-01", profile["columns"]["loaded_at"]["max"])
+
+    def test_database_text_inference_is_bounded_and_records_sample_evidence(self) -> None:
+        connection = Connection(id=26, name="db2", connection_type=ConnectionType.DB2, owner_username="tester")
+        cursor = MagicMock()
+        cursor.description = [("amount_text", str)]
+        cursor.fetchone.side_effect = [(100_000,), (100_000, 100_000, "1", "3", 0)]
+        cursor.fetchmany.side_effect = [[("1",), ("2",), ("3",)], []]
+        db_connection = MagicMock()
+        db_connection.cursor.return_value.__enter__.return_value = cursor
+        config = {"source_connection_id": 26, "source_kind": "oracle_table", "source_name": "orders", "source_sql": ""}
+
+        with patch.object(self.service.connector_service, "connect_database", return_value=db_connection):
+            profile = self.service.profile_rule_source(config, {26: connection})
+
+        inference_sql = cursor.execute.call_args_list[3].args[0]
+        self.assertIn(f"FETCH FIRST {TEXT_INFERENCE_SAMPLE_LIMIT} ROWS ONLY", inference_sql)
+        self.assertEqual(3, profile["text_inference_rows"])
+        self.assertTrue(profile["text_inference_sampled"])
+        stats = profile["columns"]["amount_text"]
+        self.assertEqual(3, stats["inference_rows_scanned"])
+        self.assertEqual(3, stats["inference_sample_size"])
+        self.assertEqual(1.0, stats["inference_confidence"])
+        self.assertTrue(stats["inference_sampled"])
+        self.assertEqual(2.0, stats["mean"])
+
+    def test_deep_database_text_inference_does_not_add_a_row_limit(self) -> None:
+        connection = Connection(id=27, name="db2", connection_type=ConnectionType.DB2, owner_username="tester")
+        cursor = MagicMock()
+        cursor.description = [("code", str)]
+        cursor.fetchone.side_effect = [(2,), (2, 2, "1", "2", 0)]
+        cursor.fetchmany.side_effect = [[("1",), ("2",)], []]
+        db_connection = MagicMock()
+        db_connection.cursor.return_value.__enter__.return_value = cursor
+        config = {"source_connection_id": 27, "source_kind": "oracle_table", "source_name": "orders", "source_sql": ""}
+
+        with patch.object(self.service.connector_service, "connect_database", return_value=db_connection):
+            profile = self.service.profile_rule_source(config, {27: connection}, text_inference_limit=None)
+
+        inference_sql = cursor.execute.call_args_list[3].args[0]
+        self.assertNotIn("FETCH FIRST", inference_sql)
+        self.assertFalse(profile["text_inference_sampled"])
+        self.assertFalse(profile["columns"]["code"]["inference_sampled"])
+        self.assertIsNone(profile["text_inference_sample_limit"])
 
     def test_database_text_min_max_exclude_blank_values(self) -> None:
         connection = Connection(id=25, name="db2", connection_type=ConnectionType.DB2, owner_username="tester")

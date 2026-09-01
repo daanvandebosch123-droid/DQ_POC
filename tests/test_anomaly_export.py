@@ -15,7 +15,19 @@ class AnomalyExportTests(unittest.TestCase):
             {
                 "profiled_at": "2026-08-12T10:00:00+00:00",
                 "row_count": 12,
-                "columns": {"email": {"type": "VARCHAR", "inferred_type": "email", "null_rate": 0.25}},
+                "text_inference_rows": 50_000,
+                "text_inference_sampled": True,
+                "columns": {
+                    "email": {
+                        "type": "VARCHAR",
+                        "inferred_type": "email",
+                        "null_rate": 0.25,
+                        "inference_confidence": 0.98,
+                        "inference_sample_size": 49_000,
+                        "inference_rows_scanned": 50_000,
+                        "inference_sampled": True,
+                    }
+                },
                 "gdpr_findings": [
                     {"severity": "medium", "column": "email", "category": "Personal data", "reason": "Name signal"}
                 ],
@@ -29,6 +41,8 @@ class AnomalyExportTests(unittest.TestCase):
         self.assertEqual("customers", workbook["Summary"]["B2"].value)
         self.assertEqual("HIGH", workbook["Drift findings"]["A2"].value)
         self.assertEqual("email", workbook["Column profile"]["A2"].value)
+        self.assertEqual(0.98, workbook["Column profile"]["D2"].value)
+        self.assertEqual("Sampled", workbook["Column profile"]["G2"].value)
         self.assertEqual("Personal data", workbook["GDPR review"]["C2"].value)
 
     def test_workbook_exports_every_available_frequency_value(self) -> None:

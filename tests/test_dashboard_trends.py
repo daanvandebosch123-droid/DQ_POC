@@ -3,7 +3,14 @@ from __future__ import annotations
 import unittest
 
 from dqtool.models.entities import RuleRun
-from dqtool.web_app import dashboard_daily_metrics, filter_runs_for_rule, format_profile_mean, missing_or_blank_percent
+from dqtool.web_app import (
+    dashboard_daily_metrics,
+    filter_runs_for_rule,
+    format_inference_details,
+    format_profile_mean,
+    format_profile_stat,
+    missing_or_blank_percent,
+)
 
 
 def _run(
@@ -28,6 +35,22 @@ class DashboardTrendTests(unittest.TestCase):
 
     def test_missing_or_blank_percent_combines_non_overlapping_rates(self) -> None:
         self.assertEqual(37.5, missing_or_blank_percent({"null_rate": 0.125, "blank_rate": 0.25}))
+
+    def test_sampled_text_inference_is_clearly_labelled(self) -> None:
+        stats = {
+            "inferred_type": "numeric text",
+            "inference_rows_scanned": 50_000,
+            "inference_sample_size": 48_000,
+            "inference_confidence": 0.975,
+            "inference_sampled": True,
+        }
+
+        details = format_inference_details(stats)
+
+        self.assertIn("97.5% match", details)
+        self.assertIn("48,000 values / 50,000 rows", details)
+        self.assertIn("sampled", details)
+        self.assertEqual("12.5 (sample)", format_profile_stat(12.5, stats))
 
     def test_daily_metrics_include_errors_in_volume_but_not_pass_rate(self) -> None:
         runs = [

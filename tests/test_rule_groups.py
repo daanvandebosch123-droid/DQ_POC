@@ -37,6 +37,16 @@ class RuleGroupStorageTests(unittest.TestCase):
         self.storage.delete_rule_group(group_id)
         self.assertEqual([], self.storage.list_rule_groups())
 
+    def test_empty_group_can_be_created_before_its_rules(self) -> None:
+        group_id = self.storage.save_rule_group(
+            RuleGroup(id=None, name="future checks", owner_username="tester")
+        )
+
+        group = next(item for item in self.storage.list_rule_groups() if item.id == group_id)
+
+        self.assertEqual([], group.rule_ids)
+        self.assertEqual([], group.child_group_ids)
+
     def test_rule_description_round_trips_through_storage(self) -> None:
         rule_id = self.storage.save_rule(
             Rule(
@@ -72,6 +82,30 @@ class RuleGroupStorageTests(unittest.TestCase):
         groups = {group.id: group for group in self.storage.list_rule_groups()}
         self.assertEqual([self.rule_b], groups[source_id].rule_ids)
         self.assertEqual([self.rule_b, self.rule_a], groups[destination_id].rule_ids)
+
+    def test_move_group_to_group_replaces_selected_direct_parent_memberships(self) -> None:
+        source_id = self.storage.save_rule_group(RuleGroup(id=None, name="source", owner_username="tester"))
+        destination_id = self.storage.save_rule_group(RuleGroup(id=None, name="destination", owner_username="tester"))
+        child_id = self.storage.save_rule_group(RuleGroup(id=None, name="child", owner_username="tester"))
+        source = next(group for group in self.storage.list_rule_groups() if group.id == source_id)
+        source.child_group_ids = [child_id]
+        self.storage.save_rule_group(source)
+
+        self.storage.move_group_to_group(child_id, destination_id, [source_id])
+
+        groups = {group.id: group for group in self.storage.list_rule_groups()}
+        self.assertEqual([], groups[source_id].child_group_ids)
+        self.assertEqual([child_id], groups[destination_id].child_group_ids)
+
+    def test_move_group_to_group_rejects_a_cycle(self) -> None:
+        parent_id = self.storage.save_rule_group(RuleGroup(id=None, name="parent", owner_username="tester"))
+        child_id = self.storage.save_rule_group(RuleGroup(id=None, name="child", owner_username="tester"))
+        parent = next(group for group in self.storage.list_rule_groups() if group.id == parent_id)
+        parent.child_group_ids = [child_id]
+        self.storage.save_rule_group(parent)
+
+        with self.assertRaises(ValueError):
+            self.storage.move_group_to_group(parent_id, child_id, [])
 
     def test_nested_group_persists_child_group_ids(self) -> None:
         parent_id = self.storage.save_rule_group(

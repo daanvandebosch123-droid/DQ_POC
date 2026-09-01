@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import unittest
 from types import SimpleNamespace
 
@@ -36,6 +37,34 @@ class AnomalyBatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(failed[2], RuntimeError)
         self.assertEqual("FOUR", next(item[1] for item in results if item[0] == "four"))
 
+    async def test_bounded_tasks_do_not_start_queued_work_after_abort(self) -> None:
+        stop = threading.Event()
+        release_workers = asyncio.Event()
+        started: list[str] = []
+
+        async def worker(target: str) -> str:
+            started.append(target)
+            await release_workers.wait()
+            return target
+
+        async def collect() -> list[tuple[str, object | None, Exception | None]]:
+            return [
+                result
+                async for result in bounded_task_results(
+                    ["one", "two", "three", "four"], worker, limit=2, should_stop=stop.is_set
+                )
+            ]
+
+        task = asyncio.create_task(collect())
+        while len(started) < 2:
+            await asyncio.sleep(0)
+        stop.set()
+        release_workers.set()
+        results = await task
+
+        self.assertEqual(["one", "two"], started)
+        self.assertEqual({"one", "two"}, {item[0] for item in results})
+
     def test_selected_targets_are_normalized_and_deduplicated(self) -> None:
         app = DQToolWebApp()
         app.anomaly_target_select = SimpleNamespace(value=[" customers ", "orders", "customers", ""])
@@ -64,6 +93,29 @@ class AnomalyBatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("42%", row["progress"])
         self.assertEqual(0.425, row["progress_value"])
         self.assertEqual("Content analysis: email", row["details"])
+
+    def test_abort_marks_queued_rows_and_requests_active_rows_to_stop(self) -> None:
+        app = DQToolWebApp()
+        app._anomaly_check_running = True
+        app._anomaly_abort_event = threading.Event()
+        app._anomaly_aborted_targets = set()
+        app.abort_anomaly_button = SimpleNamespace(disable=lambda: None)
+        app.anomaly_batch_table = SimpleNamespace(
+            rows=[
+                {"id": "orders", "status": "Running"},
+                {"id": "customers", "status": "Queued"},
+            ],
+            update=lambda: None,
+        )
+        app.anomaly_batch_status = SimpleNamespace(text="", update=lambda: None)
+        app.anomaly_summary = SimpleNamespace(content="", update=lambda: None)
+
+        app.abort_anomaly_check()
+
+        self.assertTrue(app._anomaly_abort_event.is_set())
+        self.assertEqual("Stopping", app.anomaly_batch_table.rows[0]["status"])
+        self.assertEqual("Aborted", app.anomaly_batch_table.rows[1]["status"])
+        self.assertEqual({"customers"}, app._anomaly_aborted_targets)
 
 
 if __name__ == "__main__":

@@ -359,6 +359,46 @@ class Storage:
                         (json.dumps([item for item in rule_ids if item != rule_id]), now, source_group_id),
                     )
 
+    def move_group_to_group(self, group_id: int, target_group_id: int, source_group_ids: list[int]) -> None:
+        """Nest a group under one parent and remove selected prior parent memberships.
+
+        The UI supplies only source groups that the current user may edit.  The
+        storage layer repeats the self-reference and cycle checks so the operation
+        stays safe for every caller and commits all membership changes together.
+        """
+        groups_by_id = {item.id: item for item in self.list_rule_groups() if item.id is not None}
+        group = groups_by_id.get(group_id)
+        target = groups_by_id.get(target_group_id)
+        if group is None:
+            raise ValueError("The group to move no longer exists.")
+        if target is None:
+            raise ValueError("The target group no longer exists.")
+        if group_id == target_group_id:
+            raise ValueError("A group cannot contain itself.")
+        if would_create_cycle(target_group_id, [group_id], groups_by_id):
+            raise ValueError("That destination would create a nesting cycle.")
+
+        with self._session() as conn:
+            now = utc_now()
+            target_child_ids = list(target.child_group_ids)
+            if group_id not in target_child_ids:
+                target_child_ids.append(group_id)
+                conn.execute(
+                    "UPDATE rule_groups SET child_group_ids_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(target_child_ids), now, target_group_id),
+                )
+
+            for source_group_id in set(source_group_ids) - {target_group_id}:
+                source = groups_by_id.get(source_group_id)
+                if source is None:
+                    continue
+                child_group_ids = source.child_group_ids
+                if group_id in child_group_ids:
+                    conn.execute(
+                        "UPDATE rule_groups SET child_group_ids_json = ?, updated_at = ? WHERE id = ?",
+                        (json.dumps([item for item in child_group_ids if item != group_id]), now, source_group_id),
+                    )
+
     def delete_rule_group(self, group_id: int) -> None:
         with self._session() as conn:
             conn.execute("DELETE FROM rule_groups WHERE id = ?", (group_id,))

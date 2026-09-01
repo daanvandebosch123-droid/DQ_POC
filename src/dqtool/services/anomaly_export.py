@@ -27,6 +27,13 @@ def build_anomaly_report_workbook(
             ("Profiled at (UTC)", profile.get("profiled_at") or ""),
             ("Rows", int(profile.get("row_count") or 0)),
             ("Columns profiled", len(profile.get("columns") or {})),
+            ("Text inference rows scanned", profile.get("text_inference_rows") or ""),
+            (
+                "Text inference mode",
+                "Not applicable"
+                if profile.get("text_inference_rows") is None
+                else ("Sampled" if profile.get("text_inference_sampled") else "Full source"),
+            ),
             ("Drift findings", len(anomalies)),
             ("High-severity findings", sum(1 for finding in anomalies if finding.get("severity") == "high")),
             ("GDPR review flags", len(profile.get("gdpr_findings") or [])),
@@ -46,12 +53,34 @@ def build_anomaly_report_workbook(
     columns = workbook.create_sheet("Column profile")
     _append_sheet(
         columns,
-        ["Field", "Type", "Meaning", "SQL Null %", "Blank %", "Distinct", "Min", "Max", "Mean"],
+        [
+            "Field",
+            "Type",
+            "Meaning",
+            "Inference match %",
+            "Inference values",
+            "Inference rows",
+            "Inference scope",
+            "SQL Null %",
+            "Blank %",
+            "Distinct",
+            "Min",
+            "Max",
+            "Mean",
+        ],
         [
             (
                 name,
                 stats.get("type") or "",
                 stats.get("inferred_type") or "text",
+                _percent(stats.get("inference_confidence")),
+                stats.get("inference_sample_size") if stats.get("inference_sample_size") is not None else "",
+                stats.get("inference_rows_scanned") if stats.get("inference_rows_scanned") is not None else "",
+                (
+                    ""
+                    if stats.get("inference_rows_scanned") is None
+                    else ("Sampled" if stats.get("inference_sampled") else "Full source")
+                ),
                 _percent(stats.get("null_rate")),
                 _percent(stats.get("blank_rate")),
                 stats.get("distinct_count") if stats.get("distinct_count") is not None else "",

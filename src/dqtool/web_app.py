@@ -5,6 +5,7 @@ import csv
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
@@ -36,7 +37,14 @@ from dqtool.services.ai import DEFAULT_ENDPOINT, DEFAULT_MODEL, OllamaService
 from dqtool.services.anomaly_export import build_anomaly_report_workbook
 from dqtool.services.connectors import ODBC_SETTINGS, ConnectorService
 from dqtool.services.execution import ExecutionService
-from dqtool.services.profiling import ProfilingService, detect_anomalies, profile_rule_suggestions, source_profile_key
+from dqtool.services.profiling import (
+    TEXT_INFERENCE_SAMPLE_LIMIT,
+    ProfileAborted,
+    ProfilingService,
+    detect_anomalies,
+    profile_rule_suggestions,
+    source_profile_key,
+)
 from dqtool.services.project import (
     ProjectContext,
     delete_connection_secret,
@@ -57,6 +65,7 @@ from dqtool.services.rules import (
     normalize_rule_config,
     resolve_group_rules,
     validate_rule_config,
+    would_create_cycle,
 )
 from dqtool.services.scheduling import (
     BRUSSELS_TIMEZONE,
@@ -92,21 +101,31 @@ async def bounded_task_results(
     worker: Callable[[str], Awaitable[Any]],
     *,
     limit: int = ANOMALY_PROFILE_CONCURRENCY,
+    should_stop: Callable[[], bool] | None = None,
 ) -> AsyncIterator[tuple[str, Any | None, Exception | None]]:
-    """Yield independent task outcomes as they finish, with bounded concurrency."""
-    semaphore = asyncio.Semaphore(max(1, limit))
+    """Yield outcomes while starting no more than ``limit`` independent workers."""
+    item_iterator = iter(items)
+    tasks: dict[asyncio.Task[Any], str] = {}
 
-    async def run(item: str) -> tuple[str, Any | None, Exception | None]:
-        async with semaphore:
+    def start_available_workers() -> None:
+        while len(tasks) < max(1, limit) and not (should_stop and should_stop()):
             try:
-                return item, await worker(item), None
-            except Exception as exc:
-                return item, None, exc
+                item = next(item_iterator)
+            except StopIteration:
+                return
+            tasks[asyncio.create_task(worker(item))] = item
 
-    tasks = [asyncio.create_task(run(item)) for item in items]
+    start_available_workers()
     try:
-        for task in asyncio.as_completed(tasks):
-            yield await task
+        while tasks:
+            completed, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in completed:
+                item = tasks.pop(task)
+                try:
+                    yield item, task.result(), None
+                except Exception as exc:
+                    yield item, None, exc
+            start_available_workers()
     finally:
         for task in tasks:
             if not task.done():
@@ -166,6 +185,26 @@ def format_profile_mean(value: Any) -> str:
         return f"{float(value):,.6f}".rstrip("0").rstrip(".")
     except (TypeError, ValueError):
         return ""
+
+
+def format_inference_details(stats: dict[str, Any]) -> str:
+    """Explain how much text data supported a column's inferred meaning."""
+    rows_scanned = stats.get("inference_rows_scanned")
+    sample_size = stats.get("inference_sample_size")
+    if rows_scanned is None or sample_size is None:
+        return "-"
+    confidence = stats.get("inference_confidence")
+    confidence_text = "no type match" if confidence is None else f"{float(confidence):.1%} match"
+    scope = "sampled" if stats.get("inference_sampled") else "full scan"
+    return f"{confidence_text} · {int(sample_size):,} values / {int(rows_scanned):,} rows · {scope}"
+
+
+def format_profile_stat(value: Any, stats: dict[str, Any], *, mean: bool = False) -> str:
+    """Mark inferred ranges calculated from a bounded text sample."""
+    formatted = format_profile_mean(value) if mean else ("" if value is None else str(value))
+    if formatted and stats.get("inference_sampled") and stats.get("inferred_type") in {"date/time", "numeric text"}:
+        return f"{formatted} (sample)"
+    return formatted
 
 # Shared Quasar cell templates -------------------------------------------------
 
@@ -327,6 +366,8 @@ class DQToolWebApp:
         self._anomaly_batch_reports: dict[str, dict[str, Any]] = {}
         self._active_anomaly_target = ""
         self._anomaly_check_running = False
+        self._anomaly_abort_event: threading.Event | None = None
+        self._anomaly_aborted_targets: set[str] = set()
         self._profile_suggestions: list[dict[str, Any]] = []
         self._suggestion_ai_notes: dict[int, dict[str, str]] = {}
         self._anomaly_history: list[dict[str, Any]] = []
@@ -413,9 +454,11 @@ class DQToolWebApp:
         self.preview_target_select: ui.select
         self.anomaly_connection_select: ui.select
         self.anomaly_target_select: ui.select
+        self.anomaly_deep_inference_checkbox: ui.checkbox
         self.anomaly_summary: ui.markdown
         self.anomaly_batch_status: ui.label
         self.run_anomaly_button: ui.button
+        self.abort_anomaly_button: ui.button
         self.anomaly_table: ui.table
         self.profile_table: ui.table
         self.gdpr_table: ui.table
@@ -896,7 +939,7 @@ class DQToolWebApp:
                     ui.button("Add group", icon="create_new_folder", on_click=lambda: self.show_group_dialog()).props(
                         "outline no-caps"
                     )
-                    ui.button("Move to group", icon="drive_file_move", on_click=self.move_selected_rule_to_group).props(
+                    ui.button("Move to group", icon="drive_file_move", on_click=self.move_selected_item_to_group).props(
                         "outline no-caps"
                     )
                     ui.button("Edit", icon="edit", on_click=self.edit_selected_item).props("outline no-caps")
@@ -1143,11 +1186,21 @@ class DQToolWebApp:
                             multiple=True,
                             on_change=self._on_anomaly_target_changed,
                         ).props("outlined dense use-chips options-dense").classes("grow min-w-[240px] max-w-[420px]")
+                        self.anomaly_deep_inference_checkbox = ui.checkbox("Deep text scan", value=False).props(
+                            "dense"
+                        ).tooltip(
+                            "Scan every database row when inferring text types. The default samples up to "
+                            f"{TEXT_INFERENCE_SAMPLE_LIMIT:,} rows and is usually much faster."
+                        )
                         self.run_anomaly_button = ui.button(
                             "Run anomaly checks", icon="troubleshoot", on_click=self.run_anomaly_check
                         ).props(
                             "color=primary unelevated no-caps"
                         )
+                        self.abort_anomaly_button = ui.button(
+                            "Abort", icon="cancel", on_click=self.abort_anomaly_check
+                        ).props("outline no-caps color=negative")
+                        self.abort_anomaly_button.disable()
                         ui.button("Export to Excel", icon="download", on_click=self.export_anomaly_report).props(
                             "outline no-caps"
                         ).tooltip("Exports the current anomaly check without source rows")
@@ -1187,7 +1240,11 @@ class DQToolWebApp:
                 self.anomaly_table = self._build_table(["Severity", "Column", "Finding"], pagination=8)
             with ui.card().classes("dq-soft-card w-full p-6"):
                 ui.label("Column profile").classes("dq-panel-title text-xl font-bold")
-                ui.label("Open Top values to inspect the most common values for categorical and code-like fields.").classes(
+                ui.label(
+                    "Open Top values to inspect common values. Text inference uses up to "
+                    f"{TEXT_INFERENCE_SAMPLE_LIMIT:,} database rows unless Deep text scan is selected; sample-derived "
+                    "ranges are labelled."
+                ).classes(
                     "dq-panel-copy text-sm"
                 )
                 self.profile_table = ui.table(
@@ -1195,6 +1252,7 @@ class DQToolWebApp:
                             {"name": "field", "label": "Field", "field": "field", "align": "left"},
                             {"name": "type", "label": "Type", "field": "type", "align": "left"},
                             {"name": "inferred_type", "label": "Meaning", "field": "inferred_type", "align": "left"},
+                            {"name": "inference", "label": "Inference evidence", "field": "inference", "align": "left"},
                             {"name": "null_rate", "label": "SQL Null %", "field": "null_rate", "align": "right"},
                             {"name": "blank_rate", "label": "Blank %", "field": "blank_rate", "align": "right"},
                             {"name": "distinct", "label": "Distinct", "field": "distinct", "align": "right"},
@@ -1266,7 +1324,11 @@ class DQToolWebApp:
             return
         project = self.project
         connections = {item.id: item for item in self._visible_connections() if item.id is not None}
+        text_inference_limit = None if self.anomaly_deep_inference_checkbox.value else TEXT_INFERENCE_SAMPLE_LIMIT
         self._anomaly_batch_reports = {}
+        self._anomaly_aborted_targets = set()
+        abort_event = threading.Event()
+        self._anomaly_abort_event = abort_event
         self.anomaly_batch_table.rows = [
             {
                 "id": target,
@@ -1291,12 +1353,18 @@ class DQToolWebApp:
         self.run_anomaly_button.disable()
         self.anomaly_connection_select.disable()
         self.anomaly_target_select.disable()
+        self.anomaly_deep_inference_checkbox.disable()
+        self.abort_anomaly_button.enable()
 
         async def profile_target(target: str) -> tuple[dict[str, Any], dict[str, Any]]:
             loop = asyncio.get_running_loop()
 
             def report_progress(value: float, stage: str) -> None:
-                loop.call_soon_threadsafe(self._update_anomaly_batch_progress, target, value, stage)
+                def update_progress() -> None:
+                    if not abort_event.is_set():
+                        self._update_anomaly_batch_progress(target, value, stage)
+
+                loop.call_soon_threadsafe(update_progress)
 
             self._update_anomaly_batch_row(
                 target, status="Running", progress="1%", progress_value=0.01, details="Starting profile"
@@ -1307,13 +1375,35 @@ class DQToolWebApp:
                 source_config,
                 connections,
                 progress_callback=report_progress,
+                text_inference_limit=text_inference_limit,
+                should_abort=abort_event.is_set,
             )
+            if abort_event.is_set():
+                raise ProfileAborted("Anomaly check aborted by user.")
             return source_config, profile
 
         completed_targets: list[str] = []
         failure_count = 0
         try:
-            async for target, result, error in bounded_task_results(targets, profile_target):
+            async for target, result, error in bounded_task_results(
+                targets, profile_target, should_stop=abort_event.is_set
+            ):
+                if isinstance(error, ProfileAborted):
+                    self._anomaly_aborted_targets.add(target)
+                    self._update_anomaly_batch_row(
+                        target,
+                        status="Aborted",
+                        details="Stopped before the profile was saved",
+                    )
+                    continue
+                if abort_event.is_set():
+                    self._anomaly_aborted_targets.add(target)
+                    self._update_anomaly_batch_row(
+                        target,
+                        status="Aborted",
+                        details="Completed after abort request; profile was not saved",
+                    )
+                    continue
                 if error is not None or result is None:
                     failure_count += 1
                     detail = str(error or "Unknown profiling error")
@@ -1356,6 +1446,9 @@ class DQToolWebApp:
             self.run_anomaly_button.enable()
             self.anomaly_connection_select.enable()
             self.anomaly_target_select.enable()
+            self.anomaly_deep_inference_checkbox.enable()
+            self.abort_anomaly_button.disable()
+            self._anomaly_abort_event = None
 
         if completed_targets:
             target = self._active_anomaly_target if self._active_anomaly_target in completed_targets else completed_targets[0]
@@ -1363,16 +1456,55 @@ class DQToolWebApp:
         else:
             self.anomaly_summary.content = "No anomaly checks completed successfully. Review the errors in the table above."
             self.anomaly_summary.update()
-        self.anomaly_batch_status.text = (
-            f"Finished: {len(completed_targets)} completed, {failure_count} failed. "
-            "Click a completed row to inspect its report."
-        )
+        if abort_event.is_set():
+            aborted_count = len(self._anomaly_aborted_targets)
+            self.anomaly_summary.content += (
+                f" **Aborted:** {aborted_count} source(s) were stopped and no snapshot was saved for them."
+            )
+            self.anomaly_summary.update()
+            self.anomaly_batch_status.text = (
+                f"Aborted: {len(completed_targets)} completed before the request, {aborted_count} stopped, "
+                f"{failure_count} failed."
+            )
+        else:
+            self.anomaly_batch_status.text = (
+                f"Finished: {len(completed_targets)} completed, {failure_count} failed. "
+                "Click a completed row to inspect its report."
+            )
         self.anomaly_batch_status.update()
-        self._set_last_action(f"Ran anomaly checks for {len(targets)} source(s)")
-        ui.notify(
-            f"{len(completed_targets)} anomaly check(s) completed; {failure_count} failed.",
-            type="positive" if not failure_count else "warning",
-        )
+        self._set_last_action(f"{'Aborted' if abort_event.is_set() else 'Ran'} anomaly checks for {len(targets)} source(s)")
+        if abort_event.is_set():
+            ui.notify("Anomaly check abort completed.", type="warning")
+        else:
+            ui.notify(
+                f"{len(completed_targets)} anomaly check(s) completed; {failure_count} failed.",
+                type="positive" if not failure_count else "warning",
+            )
+
+    def abort_anomaly_check(self) -> None:
+        """Stop queued profiles and ask active profiles to halt at their next safe boundary."""
+        abort_event = self._anomaly_abort_event
+        if not self._anomaly_check_running or abort_event is None:
+            ui.notify("There is no anomaly check running.", type="warning")
+            return
+        if abort_event.is_set():
+            ui.notify("Abort has already been requested.", type="warning")
+            return
+        abort_event.set()
+        self.abort_anomaly_button.disable()
+        for row in self.anomaly_batch_table.rows:
+            target = str(row.get("id") or row.get("target") or "")
+            status = str(row.get("status") or "")
+            if status == "Queued":
+                self._anomaly_aborted_targets.add(target)
+                row.update(status="Aborted", details="Not started", progress="-", progress_value=0.0)
+            elif status == "Running":
+                row.update(status="Stopping", details="Stop requested; waiting for the current database operation")
+        self.anomaly_batch_table.update()
+        self.anomaly_batch_status.text = "Abort requested. Queued checks will not start; active checks stop at a safe boundary."
+        self.anomaly_batch_status.update()
+        self.anomaly_summary.content = "_Abort requested. Active database operations may take a moment to return._"
+        self.anomaly_summary.update()
 
     def _update_anomaly_batch_progress(self, target: str, value: float, stage: str) -> None:
         percentage = max(0, min(100, round(value * 100)))
@@ -1457,6 +1589,7 @@ class DQToolWebApp:
                 "field": name,
                 "type": stats.get("type", ""),
                 "inferred_type": stats.get("inferred_type", "text"),
+                "inference": format_inference_details(stats),
                 "null_rate": f"{float(stats.get('null_rate') or 0):.1%}",
                 "blank_rate": "-" if stats.get("blank_rate") is None else f"{float(stats['blank_rate']):.1%}",
                 "distinct": stats.get("distinct_count", ""),
@@ -1465,9 +1598,9 @@ class DQToolWebApp:
                     if int(stats.get("non_null_count") or 0)
                     else "-"
                 ),
-                "min": "" if stats.get("min") is None else str(stats["min"]),
-                "max": "" if stats.get("max") is None else str(stats["max"]),
-                "mean": format_profile_mean(stats.get("mean")),
+                "min": format_profile_stat(stats.get("min"), stats),
+                "max": format_profile_stat(stats.get("max"), stats),
+                "mean": format_profile_stat(stats.get("mean"), stats, mean=True),
                 "frequency": [
                     {
                         "value": str(item.get("value", "")),
@@ -1550,6 +1683,11 @@ class DQToolWebApp:
                 f"Found **{len(anomalies)}** finding(s) for **{source_label}** "
                 f"({high} high severity), including drift versus the snapshot from "
                 f"{self._format_timestamp(previous.get('profiled_at'))}."
+            )
+        if profile.get("text_inference_sampled"):
+            message += (
+                f" Text-type inference used a **{int(profile.get('text_inference_rows') or 0):,}-row sample**; "
+                "run again with **Deep text scan** if full-table inference is required."
             )
         self.anomaly_summary.content = message
         self.anomaly_summary.update()
@@ -3475,9 +3613,6 @@ class DQToolWebApp:
             ui.notify("Open a project before creating a rule group.", type="warning")
             return
         rule_options = {str(item.id): f"{item.name} ({item.rule_type.value})" for item in self._visible_rules() if item.id is not None}
-        if not rule_options:
-            ui.notify("Create a rule before creating a rule group.", type="warning")
-            return
         all_groups = self._visible_groups()
         groups_by_id = {item.id: item for item in all_groups if item.id is not None}
         blocked_ids = {group.id} | ancestor_group_ids(group.id, groups_by_id) if group and group.id is not None else set()
@@ -3507,9 +3642,10 @@ class DQToolWebApp:
             rules_select = ui.select(
                 rule_options,
                 value=[str(rule_id) for rule_id in (group.rule_ids if group else []) if str(rule_id) in rule_options],
-                label="Rules in this group",
+                label="Rules in this group (optional)",
                 multiple=True,
             ).props("outlined use-chips options-dense").classes("w-full")
+            ui.label("You can create an empty group and add rules or subgroups later.").classes("dq-panel-copy text-xs")
             if subgroup_options:
                 subgroups_select = ui.select(
                     subgroup_options,
@@ -3540,8 +3676,6 @@ class DQToolWebApp:
                         raise ValueError("Group name is required.")
                     selected_rule_ids = [int(value) for value in (rules_select.value or [])]
                     selected_child_group_ids = [int(value) for value in (subgroups_select.value or [])] if subgroups_select else []
-                    if not selected_rule_ids and not selected_child_group_ids:
-                        raise ValueError("Select at least one rule or subgroup for the group.")
                     new_group = RuleGroup(
                         id=group.id if group else None,
                         name=(name.value or "").strip(),
@@ -5268,6 +5402,15 @@ class DQToolWebApp:
         else:
             ui.notify("Select a rule or group first.", type="warning")
 
+    def move_selected_item_to_group(self) -> None:
+        """Move the selected rule or group into a destination group."""
+        if self._selected_group() is not None:
+            self.move_selected_group_to_group()
+        elif self._selected_rule() is not None:
+            self.move_selected_rule_to_group()
+        else:
+            ui.notify("Select a rule or group to move first.", type="warning")
+
     def move_selected_rule_to_group(self) -> None:
         """Offer one-step direct-membership moves from the Rules overview."""
         if not self.project:
@@ -5322,6 +5465,75 @@ class DQToolWebApp:
                 self.refresh_all()
                 self._set_last_action(f"Moved rule {rule.name} to {destination}")
                 ui.notify(f"Moved '{rule.name}' to {destination}.", type="positive")
+
+            with ui.row().classes("justify-end gap-2 w-full"):
+                ui.button("Cancel", on_click=dialog.close).props("flat")
+                ui.button("Move", icon="drive_file_move", on_click=move).props("color=primary")
+        dialog.open()
+
+    def move_selected_group_to_group(self) -> None:
+        """Offer a safe one-step parent move for a selected rule group."""
+        if not self.project:
+            ui.notify("Open a project first.", type="warning")
+            return
+        group = self._selected_group()
+        if group is None:
+            ui.notify("Select the rule group you want to move first.", type="warning")
+            return
+        if self.current_role != Role.ADMIN and group.owner_username != self.current_user:
+            ui.notify("You can only move rule groups that you own.", type="warning")
+            return
+
+        all_groups = self.project.storage.list_rule_groups()
+        groups_by_id = {item.id: item for item in all_groups if item.id is not None}
+        manageable_groups = [
+            item for item in all_groups if self.current_role == Role.ADMIN or item.owner_username == self.current_user
+        ]
+        direct_parents = [item for item in all_groups if group.id in item.child_group_ids]
+        manageable_parents = [item for item in direct_parents if item in manageable_groups]
+        retained_parents = [item for item in direct_parents if item not in manageable_groups]
+        destinations = [
+            item
+            for item in manageable_groups
+            if item.id is not None
+            and item.id != group.id
+            and not would_create_cycle(item.id, [int(group.id or 0)], groups_by_id)
+        ]
+        if not destinations:
+            ui.notify("No editable destination group can contain this group without creating a cycle.", type="warning")
+            return
+        options = {
+            str(item.id): f"{item.name}" + (" (current)" if item in direct_parents else "")
+            for item in destinations
+        }
+
+        with ui.dialog() as dialog, ui.card().classes("w-[520px] max-w-full"):
+            ui.label("MOVE RULE GROUP").classes("dq-eyebrow")
+            ui.label(f"Move '{group.name}' to a group").classes("dq-panel-title text-xl font-bold")
+            ui.label(
+                "The group will become a subgroup of the destination and be removed from your other editable parent groups."
+            ).classes("dq-panel-copy text-sm")
+            if retained_parents:
+                ui.label(
+                    "It will remain in parent groups managed by other users: "
+                    + ", ".join(item.name for item in retained_parents)
+                    + "."
+                ).classes("dq-panel-copy text-xs")
+            target = ui.select(options, label="Destination group").props("outlined").classes("w-full")
+
+            def move() -> None:
+                if not target.value:
+                    ui.notify("Choose a destination group.", type="warning")
+                    return
+                target_id = int(target.value)
+                self.project.storage.move_group_to_group(
+                    int(group.id or 0), target_id, [int(item.id or 0) for item in manageable_parents]
+                )
+                destination = next(item.name for item in destinations if item.id == target_id)
+                dialog.close()
+                self.refresh_all()
+                self._set_last_action(f"Moved rule group {group.name} to {destination}")
+                ui.notify(f"Moved '{group.name}' to '{destination}'.", type="positive")
 
             with ui.row().classes("justify-end gap-2 w-full"):
                 ui.button("Cancel", on_click=dialog.close).props("flat")

@@ -438,7 +438,7 @@ class DQToolWebApp:
         self.connections_table: ui.table
         self.overview_table: ui.table
         self.rule_summary_table: ui.table
-        self.results_table: ui.table
+        self.run_chip_row: ui.row
         self.users_table: ui.table
         self.preview_table: ui.table
         self.failed_rows_table: ui.table
@@ -453,8 +453,6 @@ class DQToolWebApp:
         self.schedule_execution_summary: ui.label
         self.overview_search: ui.input
         self.results_search: ui.input
-        self.result_rule_select: ui.select
-        self.result_select: ui.select
         self.preview_connection_select: ui.select
         self.preview_target_select: ui.select
         self.anomaly_connection_select: ui.select
@@ -658,6 +656,22 @@ class DQToolWebApp:
               .dq-run-details td { padding: 7px 4px; border-bottom: 1px solid var(--dq-line); font-size: 13px; vertical-align: top; text-align: left; }
               .dq-run-details tr:last-child td { border-bottom: none; }
               .dq-run-details td:first-child { width: 38%; color: var(--dq-muted); font-weight: 700; white-space: nowrap; }
+              /* Results tab master-detail: a persistent tree rail on the left (sticky, scrolls
+                 on its own once it's taller than the viewport) and everything about the current
+                 selection scrolling on the right - see the responsive collapse below. */
+              /* Quasar's own .row utility (added by every ui.row()) wraps by default; without
+                 forcing nowrap here, the right column's wide content (e.g. the failed-rows
+                 table) can push the whole column below the tree rail instead of beside it. */
+              .dq-results-split { align-items: flex-start; flex-wrap: nowrap !important; }
+              .dq-results-tree-rail {
+                flex: 0 0 280px;
+                width: 280px;
+                position: sticky;
+                top: 20px;
+                max-height: calc(100vh - 40px);
+                overflow-y: auto;
+              }
+              .dq-run-chip-row::-webkit-scrollbar { height: 6px; }
               .q-dialog .q-card {
                 border-radius: 20px !important;
                 border: 1px solid var(--dq-line);
@@ -709,6 +723,17 @@ class DQToolWebApp:
               @media (max-width: 600px) {
                 .dq-page-heading { font-size: 28px !important; }
                 .dq-hero { min-height: 250px; }
+              }
+              @media (max-width: 1100px) {
+                /* Results tab: the fixed-width tree rail only works with real room beside it -
+                   below this width, stack the tree above the detail pane instead. */
+                .dq-results-split { flex-direction: column !important; }
+                .dq-results-tree-rail {
+                  position: static;
+                  width: 100% !important;
+                  flex: 1 1 auto !important;
+                  max-height: 420px;
+                }
               }
             </style>
             """
@@ -1106,103 +1131,97 @@ class DQToolWebApp:
     def _build_results_tab(self) -> None:
         with ui.column().classes("w-full gap-4"):
             with ui.card().classes("dq-soft-card dq-section-card w-full p-6"):
-                with ui.row().classes("w-full items-start justify-between gap-4 flex-wrap"):
-                    with ui.column().classes("gap-1"):
-                        ui.label("HISTORY").classes("dq-eyebrow")
-                        with ui.row().classes("items-center gap-2"):
-                            ui.label("Execution results").classes("dq-panel-title text-2xl font-bold")
-                            ui.icon("help_outline", size="18px").classes("text-[#a39c8f] cursor-help").tooltip(
-                                "Rules are grouped the same way as the Rules tab; group rows summarize "
-                                "the rules nested under them."
+                with ui.column().classes("gap-1"):
+                    ui.label("HISTORY").classes("dq-eyebrow")
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label("Execution results").classes("dq-panel-title text-2xl font-bold")
+                        ui.icon("help_outline", size="18px").classes("text-[#a39c8f] cursor-help").tooltip(
+                            "Rules are grouped the same way as the Rules tab; group rows summarize "
+                            "the rules nested under them."
+                        )
+                    ui.label("Pick a rule or group on the left, then a run - everything about it shows on the right.").classes(
+                        "dq-panel-copy text-sm"
+                    )
+            with ui.row().classes("w-full dq-results-split gap-4"):
+                with ui.column().classes("dq-results-tree-rail gap-0"):
+                    with ui.card().classes("dq-soft-card w-full p-4"):
+                        self.results_search = ui.input(placeholder="Search rules and groups...").props(
+                            "outlined dense clearable prepend-icon=search"
+                        ).classes("w-full")
+                        self.results_search.on_value_change(lambda _event: self._refresh_results_view())
+                        rail_columns = self._columns(["Name", "Last Status"])
+                        for column in rail_columns:
+                            if column["name"] == "last_status":
+                                column["style"] = "width: 74px; max-width: 74px;"
+                                column["headerStyle"] = "width: 74px;"
+                        self.rule_summary_table = ui.table(
+                            columns=rail_columns,
+                            rows=[],
+                            row_key="key",
+                            # Same reasoning as the Rules tab's overview_table: paginating a tree
+                            # by flattened row can split a group from its own rows across pages.
+                            pagination=0,
+                        ).props("flat wrap-cells hide-pagination").classes("dq-table-wrap dq-tree-table w-full mt-3")
+                        self.rule_summary_table.classes(add="dq-selectable-table")
+                        self.rule_summary_table.on("rowClick", self._select_result_rule_row)
+                        self.rule_summary_table.on("toggle_group", self._on_toggle_results_group)
+                        # Same tree treatment as the Rules tab: indentation + per-kind icon + chevron.
+                        self.rule_summary_table.add_slot("body-cell-name", TREE_NAME_CELL_TEMPLATE)
+                        self.rule_summary_table.add_slot("body-cell-last_status", STATUS_BADGE_CELL_TEMPLATE)
+                with ui.column().classes("gap-4 grow min-w-0"):
+                    with ui.card().classes("dq-soft-card w-full p-6"):
+                        with ui.row().classes("w-full items-center justify-between gap-2"):
+                            with ui.column().classes("gap-0"):
+                                ui.label("RUNS").classes("dq-eyebrow")
+                                ui.label("Every run, newest first").classes("dq-panel-title text-lg font-bold")
+                            ui.button("Delete", icon="delete", on_click=self.delete_selected_result).props(
+                                "outline dense no-caps color=negative"
                             )
-                        ui.label("Select a rule to inspect its executions below.").classes("dq-panel-copy text-sm")
-                    with ui.row().classes("items-end gap-2 flex-wrap grow justify-end"):
-                        self.result_rule_select = ui.select(options={}, label="Selected rule").props("outlined dense").classes(
-                            "grow min-w-[230px] max-w-[380px]"
+                        # Rebuilt by _render_run_chips: one small chip per run, colored by status,
+                        # filled when it's the current selection. Picking a chip is now the only
+                        # way to choose a run - see _select_run.
+                        self.run_chip_row = ui.row().classes(
+                            "w-full flex-nowrap gap-2 overflow-x-auto pb-1 mt-2 dq-run-chip-row"
                         )
-                        self.result_rule_select.on_value_change(self._on_result_item_select_change)
-                with ui.row().classes("w-full items-center gap-2 mt-2"):
-                    self.results_search = ui.input(placeholder="Search rules and groups...").props(
-                        "outlined dense clearable prepend-icon=search"
-                    ).classes("w-full max-w-md")
-                    self.results_search.on_value_change(lambda _event: self._refresh_results_view())
-                self.rule_summary_table = ui.table(
-                    columns=self._tree_table_columns(["Name", "Kind", "Details", "Runs", "Last Status", "Last Run", "Last Failed"]),
-                    rows=[],
-                    row_key="key",
-                    # Same reasoning as the Rules tab's overview_table: paginating a tree by
-                    # flattened row can split a group from its own nested rows across pages.
-                    pagination=0,
-                ).props("flat bordered wrap-cells hide-pagination").classes("dq-table-wrap dq-tree-table w-full mt-4")
-                self.rule_summary_table.classes(add="dq-selectable-table")
-                self.rule_summary_table.on("rowClick", self._select_result_rule_row)
-                self.rule_summary_table.on("toggle_group", self._on_toggle_results_group)
-                # Same tree treatment as the Rules tab: indentation + per-kind icon + collapse chevron.
-                self.rule_summary_table.add_slot("body-cell-name", TREE_NAME_CELL_TEMPLATE)
-                self.rule_summary_table.add_slot("body-cell-details", TREE_DETAILS_CELL_TEMPLATE)
-                # Colors the aggregated/last status so passed/failed/error reads at a glance.
-                self.rule_summary_table.add_slot("body-cell-last_status", STATUS_BADGE_CELL_TEMPLATE)
-            with ui.card().classes("dq-soft-card w-full p-6"):
-                with ui.row().classes("w-full items-start justify-between gap-4 flex-wrap"):
-                    with ui.column().classes("gap-1"):
-                        ui.label("DETAIL").classes("dq-eyebrow")
-                        ui.label("Executions of the selected rule or group").classes("dq-panel-title text-xl font-bold")
-                        ui.label("Every run, newest first. Select a group to see its rules' combined execution history.").classes(
-                            "dq-panel-copy text-sm"
+                    with ui.card().classes("dq-soft-card w-full p-6"):
+                        with ui.row().classes("w-full items-center justify-between gap-2"):
+                            ui.label("Run details").classes("dq-panel-title text-lg font-bold")
+                            ui.button("Explain with AI", icon="psychology", on_click=self.explain_selected_result).props(
+                                "outline dense no-caps"
+                            ).tooltip("Uses the configured Ollama endpoint - review your AI settings before sharing sensitive sources")
+                        self.result_details = ui.markdown("Select a run to view its details.").classes(
+                            "w-full dq-run-details"
                         )
-                    with ui.row().classes("items-end gap-2 flex-wrap grow justify-end"):
-                        self.result_select = ui.select(options={}, label="Selected run").props("outlined dense").classes(
-                            "grow min-w-[230px] max-w-[380px]"
+                        self.result_ai_explanation = ui.markdown("").classes("w-full mt-2")
+                    with ui.card().classes("dq-soft-card w-full p-6"):
+                        ui.label("Failed row preview").classes("dq-panel-title text-lg font-bold")
+                        self.failed_rows_label = ui.label("Select a run to preview its failed rows.").classes(
+                            "text-sm text-slate-700"
                         )
-                        self.result_select.on_value_change(self._on_result_select_change)
-                        ui.button("Details", icon="subject", on_click=self.view_selected_result).props("outline no-caps")
-                        ui.button("Failed rows", icon="table_view", on_click=self.preview_selected_failed_rows).props(
-                            "color=primary unelevated no-caps"
-                        )
-                        ui.button("Delete", icon="delete", on_click=self.delete_selected_result).props(
-                            "outline no-caps color=negative"
-                        )
-                self.results_table = self._build_table(
-                    ["Run", "Rule", "Status", "Checked", "Failed", "Started", "Runtime", "Failed Rows File"]
-                )
-                self.results_table.classes(add="dq-selectable-table")
-                self.results_table.on("rowClick", self._select_result_row)
-            with ui.row().classes("w-full items-stretch gap-4"):
-                with ui.card().classes("dq-soft-card w-full lg:w-[calc(50%-8px)] p-6"):
-                    ui.label("TREND").classes("dq-eyebrow")
-                    ui.label("Run outcomes per day (selected rule)").classes("dq-panel-title text-xl font-bold")
-                    self.results_outcome_chart = ui.echart(self._empty_chart_options("No runs yet")).classes(
-                        "w-full h-[260px]"
-                    )
-                with ui.card().classes("dq-soft-card w-full lg:w-[calc(50%-8px)] p-6"):
-                    ui.label("RULE HISTORY").classes("dq-eyebrow")
-                    ui.label("Failed rows over time (selected rule)").classes("dq-panel-title text-xl font-bold")
-                    self.results_trend_chart = ui.echart(self._empty_chart_options("Select a rule")).classes(
-                        "w-full h-[260px]"
-                    )
-            with ui.row().classes("w-full items-stretch gap-4"):
-                with ui.card().classes("dq-soft-card w-full lg:w-[calc(40%-8px)] p-6"):
-                    with ui.row().classes("w-full items-center justify-between gap-2"):
-                        ui.label("Run details").classes("dq-panel-title text-xl font-bold")
-                        ui.button("Explain with AI", icon="psychology", on_click=self.explain_selected_result).props(
-                            "outline dense no-caps"
-                        ).tooltip("Uses the configured Ollama endpoint - review your AI settings before sharing sensitive sources")
-                    self.result_details = ui.markdown("Select a run to view its details.").classes(
-                        "w-full dq-run-details"
-                    )
-                    self.result_ai_explanation = ui.markdown("").classes("w-full mt-2")
-                with ui.card().classes("dq-soft-card w-full lg:w-[calc(60%-8px)] p-6"):
-                    ui.label("Failed row preview").classes("dq-panel-title text-xl font-bold")
-                    self.failed_rows_label = ui.label("Select a failed result to preview rows.").classes("text-sm text-slate-700")
-                    with ui.row().classes("w-full items-end gap-2 mt-3 flex-wrap"):
-                        self.failed_rows_search = ui.input(
-                            "Search failed rows", placeholder="Find a value...", on_change=self._filter_failed_rows_preview
-                        ).props("outlined dense clearable").classes("grow min-w-[180px]")
-                        self.failed_rows_column_select = ui.select(
-                            {"__all__": "All columns"}, value="__all__", label="Search in", on_change=self._filter_failed_rows_preview
-                        ).props("outlined dense options-dense").classes("min-w-[170px]")
-                        ui.button("Clear", icon="clear", on_click=self._clear_failed_rows_filter).props("outline dense no-caps")
-                    self.failed_rows_table = self._build_table([], pagination=8)
+                        with ui.row().classes("w-full items-end gap-2 mt-3 flex-wrap"):
+                            self.failed_rows_search = ui.input(
+                                "Search failed rows", placeholder="Find a value...", on_change=self._filter_failed_rows_preview
+                            ).props("outlined dense clearable").classes("grow min-w-[180px]")
+                            self.failed_rows_column_select = ui.select(
+                                {"__all__": "All columns"}, value="__all__", label="Search in", on_change=self._filter_failed_rows_preview
+                            ).props("outlined dense options-dense").classes("min-w-[170px]")
+                            ui.button("Clear", icon="clear", on_click=self._clear_failed_rows_filter).props("outline dense no-caps")
+                        # Full width now that it's not squeezed next to Run details - this table is
+                        # where analysts actually spend their time.
+                        self.failed_rows_table = self._build_table([], pagination=10)
+                    with ui.card().classes("dq-soft-card w-full p-2"):
+                        with ui.expansion("Trends", icon="insights", value=False).classes("w-full"):
+                            with ui.row().classes("w-full items-stretch gap-4 p-4"):
+                                with ui.column().classes("w-full lg:w-[calc(50%-8px)] gap-1"):
+                                    ui.label("Run outcomes per day").classes("dq-panel-title text-sm font-bold")
+                                    self.results_outcome_chart = ui.echart(
+                                        self._empty_chart_options("No runs yet")
+                                    ).classes("w-full h-[220px]")
+                                with ui.column().classes("w-full lg:w-[calc(50%-8px)] gap-1"):
+                                    ui.label("Failed rows over time").classes("dq-panel-title text-sm font-bold")
+                                    self.results_trend_chart = ui.echart(
+                                        self._empty_chart_options("Select a rule")
+                                    ).classes("w-full h-[220px]")
 
     def _build_anomalies_tab(self) -> None:
         with ui.column().classes("w-full gap-4"):
@@ -4522,7 +4541,7 @@ class DQToolWebApp:
         self.failed_rows_column_select.update()
         self.failed_rows_table.columns = []
         self.failed_rows_table.rows = []
-        self._sync_pagination_visibility(self.failed_rows_table, page_size=8)
+        self._sync_pagination_visibility(self.failed_rows_table, page_size=10)
         self.failed_rows_table.update()
 
     def _filter_failed_rows_preview(self, _event: Any = None) -> None:
@@ -4551,7 +4570,7 @@ class DQToolWebApp:
             {"id": index, **row}
             for index, row in enumerate(filtered_rows)
         ]
-        self._sync_pagination_visibility(self.failed_rows_table, page_size=8)
+        self._sync_pagination_visibility(self.failed_rows_table, page_size=10)
         self.failed_rows_table.update()
         if self._failed_rows_preview_context:
             previewed = len(self._failed_rows_preview_data)
@@ -5126,9 +5145,10 @@ class DQToolWebApp:
             self._results_all_rows = []
             self.rule_summary_table.rows = []
             self.rule_summary_table.update()
-            self.results_table.rows = []
-            self._sync_pagination_visibility(self.results_table, page_size=10)
-            self.results_table.update()
+            self.selected_result_rule_id = None
+            self.selected_run_id = None
+            self._render_run_chips([], {})
+            self._reset_result_detail_panels("Open a project to see results.")
             self._set_chart_options(self.results_outcome_chart, self._empty_chart_options("Open a project to see charts"))
             self._set_chart_options(self.results_trend_chart, self._empty_chart_options("Open a project to see charts"))
             return
@@ -5238,22 +5258,25 @@ class DQToolWebApp:
         for row in rows:
             row["has_children"] = child_counts.get(row["stable_key"], 0) > 0
 
-        options: dict[str, str] = {}
+        # Keys in row/traversal order - used only to validate/fall back the current selection
+        # now that there's no dropdown to label (see _sync_selected_item_key on the Rules tab
+        # for the same pattern).
+        valid_keys: list[str] = []
+        seen_keys: set[str] = set()
         for row in rows:
-            if row["stable_key"] not in options:
-                prefix = "\U0001f4c1 " if row["kind"] == "group" else ""
-                suffix = f" ({row['runs']} run{'' if row['runs'] == 1 else 's'})" if row["runs"] else ""
-                options[row["stable_key"]] = f"{prefix}{row['name']}{suffix}"
+            if row["stable_key"] not in seen_keys:
+                seen_keys.add(row["stable_key"])
+                valid_keys.append(row["stable_key"])
 
         self._results_all_rows = rows
-        self._set_select_options(self.result_rule_select, options, self.selected_result_rule_id)
+        self.selected_result_rule_id = self._resolve_selection(self.selected_result_rule_id, valid_keys)
         self._refresh_results_view()
         self._populate_result_runs()
         self._update_results_outcome_chart(runs)
         self._update_result_trend_chart()
 
     def _selected_result_rule_id(self) -> int | None:
-        selected = self.result_rule_select.value if self.project else None
+        selected = self.selected_result_rule_id if self.project else None
         if not selected or not str(selected).startswith("rule:"):
             return None
         return int(str(selected).split(":", 1)[1])
@@ -5261,43 +5284,26 @@ class DQToolWebApp:
     def _populate_result_runs(self) -> None:
         if not self.project:
             return
-        selected = str(self.result_rule_select.value or "")
+        selected = self.selected_result_rule_id or ""
         rules_by_id = {rule.id: rule for rule in self._visible_rules() if rule.id is not None}
+        is_group = selected.startswith("group:")
         if selected.startswith("rule:"):
             selected_rule_ids = {int(selected.split(":", 1)[1])}
-        elif selected.startswith("group:"):
+        elif is_group:
             group_id = int(selected.split(":", 1)[1])
             groups_by_id = {group.id: group for group in self._visible_groups() if group.id is not None}
             group = groups_by_id.get(group_id)
             selected_rule_ids = {rule.id for rule in resolve_group_rules(group, groups_by_id, rules_by_id)[0]} if group else set()
         else:
             selected_rule_ids = set()
+        # newest first, matching storage's own ordering - so run chips render newest-to-oldest.
         runs = [run for run in self.project.storage.list_rule_runs() if run.rule_id in selected_rule_ids]
         rule_names = {rule_id: rule.name for rule_id, rule in rules_by_id.items()}
-        rows = []
-        options: dict[str, str] = {}
-        for run in runs:
-            summary = run.summary_json
-            rows.append(
-                {
-                    "id": run.id,
-                    "run": run.id,
-                    "rule": rule_names.get(run.rule_id, f"Rule #{run.rule_id}"),
-                    "status": run.status.upper(),
-                    "checked": summary.get("checked_count", ""),
-                    "failed": summary.get("failed_count", ""),
-                    "started": self._format_timestamp(run.started_at),
-                    "runtime": self._format_runtime(run.runtime_ms),
-                    "failed_rows_file": Path(run.failed_rows_path).name if run.failed_rows_path else "",
-                }
-            )
-            rule_name = rule_names.get(run.rule_id, f"Rule #{run.rule_id}")
-            options[str(run.id)] = f"{rule_name} | Run {run.id} | {self._format_timestamp(run.started_at)} | {run.status.upper()}"
-        self.results_table.rows = rows
-        self._sync_pagination_visibility(self.results_table, page_size=10)
-        self.results_table.update()
-        self._set_select_options(self.result_select, options, self.selected_run_id)
-        self._highlight_table_row(self.results_table, self.result_select.value)
+        self.selected_run_id = self._resolve_selection(self.selected_run_id, [str(run.id) for run in runs])
+        # Only label chips with their rule name when a group mixes runs from several rules -
+        # for a single rule it's already unambiguous, and the label stays short.
+        self._render_run_chips(runs, rule_names, show_rule_name=is_group)
+        self._show_selected_result_context()
 
     def _populate_users(self) -> None:
         is_workspace_admin = self.signed_in and self.workspace_role == WorkspaceRole.WORKSPACE_ADMIN
@@ -5644,13 +5650,9 @@ class DQToolWebApp:
             ui.notify("Select a rule or group first.", type="warning")
 
     def _selected_result(self) -> RuleRun | None:
-        if not self.project:
+        if not self.project or not self.selected_run_id:
             return None
-        selected_id = self.result_select.value
-        self.selected_run_id = str(selected_id) if selected_id else self.selected_run_id
-        if not selected_id:
-            return None
-        run_id = int(selected_id)
+        run_id = int(self.selected_run_id)
         return next((item for item in self.project.storage.list_rule_runs() if item.id == run_id), None)
 
     def _visible_connections(self) -> list[Connection]:
@@ -5689,19 +5691,19 @@ class DQToolWebApp:
         value = current_value if current_value in options else (next(iter(options)) if options else None)
         select.options = options
         select.value = value
-        if select is self.result_select:
-            self.selected_run_id = value
-        if select is self.result_rule_select:
-            self.selected_result_rule_id = value
         if select is self.connection_select:
             self.selected_connection_id = value
         select.update()
 
+    @staticmethod
+    def _resolve_selection(current: str | None, valid_keys: list[str]) -> str | None:
+        """Keep a selection valid as the underlying list changes: fall back to the first
+        available key (or None) if the previously selected one disappeared."""
+        return current if current in valid_keys else (valid_keys[0] if valid_keys else None)
+
     def _sync_selected_item_key(self, valid_keys: list[str]) -> None:
-        """Keep the Rules tab's selection valid as its rows are rebuilt: fall back to the
-        first available item (or none) if the previously selected one disappeared."""
-        current = self.selected_item_key
-        self.selected_item_key = current if current in valid_keys else (valid_keys[0] if valid_keys else None)
+        """Keep the Rules tab's selection valid as its rows are rebuilt."""
+        self.selected_item_key = self._resolve_selection(self.selected_item_key, valid_keys)
 
     def _refresh_overview_view(self) -> None:
         for row in self._overview_all_rows:
@@ -5861,17 +5863,10 @@ class DQToolWebApp:
         row = self._row_from_click_event(event)
         if row is None:
             return
-        key = row["stable_key"]
-        self.selected_result_rule_id = key
-        self.result_rule_select.value = key
-        self.result_rule_select.update()
-        self._highlight_results_row()
-        self._populate_result_runs()
-        self._update_results_outcome_chart(self.project.storage.list_rule_runs() if self.project else [])
-        self._update_result_trend_chart()
-
-    def _on_result_item_select_change(self, event: Any) -> None:
-        self.selected_result_rule_id = event.value
+        self.selected_result_rule_id = row["stable_key"]
+        # A new rule/group selection invalidates whatever run was selected before -
+        # _populate_result_runs resolves it (falling back to the latest run) and redraws
+        # the chips, run details, and failed rows for it.
         self._highlight_results_row()
         self._populate_result_runs()
         self._update_results_outcome_chart(self.project.storage.list_rule_runs() if self.project else [])
@@ -5885,7 +5880,7 @@ class DQToolWebApp:
         self._highlight_results_row()
 
     def _highlight_results_row(self) -> None:
-        selected = self.result_rule_select.value
+        selected = self.selected_result_rule_id
         self.rule_summary_table.selected = [row for row in self.rule_summary_table.rows if row["stable_key"] == selected]
         self.rule_summary_table.update()
 
@@ -5900,25 +5895,55 @@ class DQToolWebApp:
             self._results_collapsed.add(stable_key)
         self._refresh_results_view()
 
-    def _select_result_row(self, event: Any) -> None:
-        row = self._row_from_click_event(event)
-        if row is None:
-            return
-        selected_id = str(row["id"])
-        self.selected_run_id = selected_id
-        self.result_select.value = selected_id
-        self.result_select.update()
-        self._show_selected_result_context()
+    def _select_run(self, run_id: int) -> None:
+        """Handles a run-chip click - the only way to pick a run now (see _render_run_chips)."""
+        self.selected_run_id = str(run_id)
+        self._populate_result_runs()
 
-    def _on_result_select_change(self, event: Any) -> None:
-        self.selected_run_id = str(event.value) if event.value else None
-        self._show_selected_result_context()
+    def _render_run_chips(
+        self, runs: list[RuleRun], rule_names: dict[int, str], *, show_rule_name: bool = False
+    ) -> None:
+        """Rebuild the horizontal run picker: one small chip per run, colored by status,
+        filled when it's the current selection. Runs already arrive newest-first."""
+        status_color = {"passed": "positive", "failed": "negative", "error": "warning"}
+        status_icon = {"passed": "check", "failed": "close", "error": "priority_high"}
+        self.run_chip_row.clear()
+        with self.run_chip_row:
+            if not runs:
+                ui.label("No runs yet.").classes("dq-panel-copy text-sm")
+                return
+            for run in runs:
+                is_selected = str(run.id) == self.selected_run_id
+                label = self._format_short_timestamp(run.started_at)
+                if show_rule_name:
+                    label = f"{rule_names.get(run.rule_id, f'Rule #{run.rule_id}')} · {label}"
+                variant = "unelevated" if is_selected else "outline"
+                color = status_color.get(run.status, "grey-6")
+                ui.button(
+                    label,
+                    icon=status_icon.get(run.status, "help"),
+                    on_click=lambda _e, run_id=run.id: self._select_run(run_id),
+                ).props(f"{variant} dense no-caps color={color}").classes("shrink-0")
 
     def _show_selected_result_context(self) -> None:
-        selected_id = self.result_select.value
-        self._highlight_table_row(self.results_table, selected_id)
+        if self.selected_run_id is None:
+            self._reset_result_detail_panels("Select a run to view its details.")
+            return
         self.view_selected_result()
         self.preview_selected_failed_rows()
+
+    def _reset_result_detail_panels(self, message: str) -> None:
+        """Puts the run-details and failed-rows panels back to their empty placeholder -
+        used when there's genuinely nothing selected yet, without the "select a result
+        first" warnings view_selected_result/preview_selected_failed_rows show for an
+        explicit action with no selection."""
+        self.result_details.content = message
+        self.result_details.update()
+        self.result_ai_explanation.content = ""
+        self.result_ai_explanation.update()
+        self._clear_failed_rows_preview()
+        self.failed_rows_label.text = message
+        self.failed_rows_label.update()
 
     def _format_timestamp(self, value: str | None) -> str:
         if not value:
@@ -5928,6 +5953,18 @@ class DQToolWebApp:
             if parsed.tzinfo:
                 parsed = parsed.astimezone()
             return parsed.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return value
+
+    def _format_short_timestamp(self, value: str | None) -> str:
+        """Compact form for run chips - month-day + time, no year/seconds."""
+        if not value:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo:
+                parsed = parsed.astimezone()
+            return parsed.strftime("%m-%d %H:%M")
         except ValueError:
             return value
 

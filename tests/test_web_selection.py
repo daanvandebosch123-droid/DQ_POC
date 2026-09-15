@@ -23,8 +23,6 @@ class WebSelectionTests(unittest.TestCase):
         self.app = DQToolWebApp()
         self.rule_row = {"stable_key": "rule:7", "id": 7, "kind": "rule", "name": "Required email"}
         self.app.overview_table = FakeElement(rows=[self.rule_row])
-        self.app.results_table = FakeElement(rows=[{"id": 12, "status": "FAILED"}])
-        self.app.result_select = FakeElement()
 
     def test_clicking_overview_rule_row_selects_rule(self) -> None:
         event = SimpleNamespace(args=[{}, self.rule_row, 0])
@@ -44,16 +42,15 @@ class WebSelectionTests(unittest.TestCase):
         button.enable.assert_called_once_with()
         button.disable.assert_not_called()
 
-    def test_clicking_result_row_selects_result_and_opens_details(self) -> None:
-        self.app.view_selected_result = Mock()
-        event = SimpleNamespace(args=[{}, {"id": 12, "status": "FAILED"}, 0])
+    def test_clicking_a_run_chip_selects_that_run(self) -> None:
+        # _populate_result_runs is what rebuilds the chips and redraws run details/failed
+        # rows for the new selection - _select_run just needs to set state and trigger it.
+        self.app._populate_result_runs = Mock()
 
-        self.app._select_result_row(event)
+        self.app._select_run(12)
 
         self.assertEqual("12", self.app.selected_run_id)
-        self.assertEqual("12", self.app.result_select.value)
-        self.assertEqual([{"id": 12, "status": "FAILED"}], self.app.results_table.selected)
-        self.app.view_selected_result.assert_called_once_with()
+        self.app._populate_result_runs.assert_called_once_with()
 
     def test_freshness_message_describes_the_newest_value_not_a_failed_row(self) -> None:
         rule = Rule(

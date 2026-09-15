@@ -38,3 +38,6 @@ tests/.runtime-latin1.csv
 # Local Codex/agent workspace metadata
 .agents/
 .codex/
+
+# Local Claude Code brainstorming-companion mockups
+.superpowers/

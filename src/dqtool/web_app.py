@@ -637,7 +637,9 @@ class DQToolWebApp:
               .dq-main th { font-size: 11px !important; font-weight: 800 !important; letter-spacing: .08em; text-transform: uppercase; }
               .dq-main tbody tr:hover { background: #f4f2ed; }
               .dq-main .dq-selectable-table tbody tr { cursor: pointer; transition: background-color .16s ease, box-shadow .16s ease; }
-              .dq-main .dq-selectable-table tbody tr.selected { background: #e9e6df !important; box-shadow: inset 4px 0 0 var(--dq-teal); }
+              /* Tinted with the brand color (not just a darker grey) so a selected row reads as
+                 clearly distinct from a merely-hovered one, not just "one shade darker". */
+              .dq-main .dq-selectable-table tbody tr.selected { background: rgba(111, 105, 96, .18) !important; box-shadow: inset 4px 0 0 var(--dq-teal); }
               .dq-main .dq-tree-table td { padding-top: 10px !important; padding-bottom: 10px !important; }
               .dq-main .dq-tree-table .q-badge { font-weight: 700; }
               .dq-main .q-btn { border-radius: 11px; font-weight: 700; letter-spacing: 0; }
@@ -645,6 +647,13 @@ class DQToolWebApp:
               .dq-meta-card { background: linear-gradient(145deg, #faf7f1, #fff) !important; border-color: #e5ded2 !important; }
               .dq-section-card { border-top: 4px solid var(--dq-teal) !important; }
               .dq-table-wrap { overflow-x: auto; border-radius: 14px; }
+              /* Renders the "Run details" markdown table as a clean label/value panel instead of a
+                 raw HTML table: no header row, muted bold labels, quiet row separators. */
+              .dq-run-details table { width: 100%; border-collapse: collapse; }
+              .dq-run-details thead { display: none; }
+              .dq-run-details td { padding: 7px 4px; border-bottom: 1px solid var(--dq-line); font-size: 13px; vertical-align: top; text-align: left; }
+              .dq-run-details tr:last-child td { border-bottom: none; }
+              .dq-run-details td:first-child { width: 38%; color: var(--dq-muted); font-weight: 700; white-space: nowrap; }
               .q-dialog .q-card {
                 border-radius: 20px !important;
                 border: 1px solid var(--dq-line);
@@ -921,11 +930,13 @@ class DQToolWebApp:
             with ui.row().classes("w-full items-start justify-between gap-4 flex-wrap"):
                 with ui.column().classes("gap-1"):
                     ui.label("CHECKS & BATCHES").classes("dq-eyebrow")
-                    ui.label("Rules & rule groups").classes("dq-panel-title text-2xl font-bold")
-                    ui.label(
-                        "One overview of every rule and rule group. Groups show their nested subgroups "
-                        "and member rules indented underneath, in a single tree."
-                    ).classes("dq-panel-copy text-sm")
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label("Rules & rule groups").classes("dq-panel-title text-2xl font-bold")
+                        ui.icon("help_outline", size="18px").classes("text-[#a39c8f] cursor-help").tooltip(
+                            "Groups show their nested subgroups and member rules indented underneath, "
+                            "in a single tree."
+                        )
+                    ui.label("See every rule and rule group in one place.").classes("dq-panel-copy text-sm")
                 with ui.row().classes("items-end gap-2 flex-wrap grow justify-end"):
                     self.item_select = ui.select(options={}, label="Selected item").props("outlined dense").classes(
                         "grow min-w-[230px] max-w-[380px]"
@@ -944,8 +955,11 @@ class DQToolWebApp:
                         "outline no-caps"
                     )
                     ui.button("Edit", icon="edit", on_click=self.edit_selected_item).props("outline no-caps")
+                    # Run is a frequent, safe action - it gets the "positive" brand color rather than
+                    # the alarm-red "secondary" so it doesn't visually outrank Delete, the one button
+                    # here that actually warrants caution.
                     ui.button("Run", icon="play_arrow", on_click=self.run_selected_item).props(
-                        "color=secondary unelevated no-caps"
+                        "color=positive unelevated no-caps"
                     )
                     ui.button("Delete", icon="delete", on_click=self.delete_selected_item).props(
                         "outline no-caps color=negative"
@@ -954,7 +968,7 @@ class DQToolWebApp:
                 ui.label("Check rules below to run just those.").classes("dq-panel-copy text-xs text-[#837d74] grow")
                 self.run_checked_button = ui.button(
                     "Run selected (0)", icon="playlist_play", on_click=self.run_checked_rules
-                ).props("outline no-caps")
+                ).props("outline no-caps color=positive")
                 self.run_checked_button.visible = False
             with ui.row().classes("w-full items-center gap-2 mt-3"):
                 self.overview_search = ui.input(placeholder="Search rules and groups...").props(
@@ -1076,11 +1090,13 @@ class DQToolWebApp:
                 with ui.row().classes("w-full items-start justify-between gap-4 flex-wrap"):
                     with ui.column().classes("gap-1"):
                         ui.label("HISTORY").classes("dq-eyebrow")
-                        ui.label("Execution results").classes("dq-panel-title text-2xl font-bold")
-                        ui.label(
-                            "Rules grouped the same way as the Rules tab. Select a rule to inspect its "
-                            "executions below; group rows summarize the rules nested under them."
-                        ).classes("dq-panel-copy text-sm")
+                        with ui.row().classes("items-center gap-2"):
+                            ui.label("Execution results").classes("dq-panel-title text-2xl font-bold")
+                            ui.icon("help_outline", size="18px").classes("text-[#a39c8f] cursor-help").tooltip(
+                                "Rules are grouped the same way as the Rules tab; group rows summarize "
+                                "the rules nested under them."
+                            )
+                        ui.label("Select a rule to inspect its executions below.").classes("dq-panel-copy text-sm")
                     with ui.row().classes("items-end gap-2 flex-wrap grow justify-end"):
                         self.result_rule_select = ui.select(options={}, label="Selected rule").props("outlined dense").classes(
                             "grow min-w-[230px] max-w-[380px]"
@@ -1150,7 +1166,9 @@ class DQToolWebApp:
                         ui.button("Explain with AI", icon="psychology", on_click=self.explain_selected_result).props(
                             "outline dense no-caps"
                         ).tooltip("Uses the configured Ollama endpoint - review your AI settings before sharing sensitive sources")
-                    self.result_details = ui.markdown("Select a run to view its details.").classes("w-full")
+                    self.result_details = ui.markdown("Select a run to view its details.").classes(
+                        "w-full dq-run-details"
+                    )
                     self.result_ai_explanation = ui.markdown("").classes("w-full mt-2")
                 with ui.card().classes("dq-soft-card w-full lg:w-[calc(60%-8px)] p-6"):
                     ui.label("Failed row preview").classes("dq-panel-title text-xl font-bold")
@@ -4324,6 +4342,17 @@ class DQToolWebApp:
         outcome = "passed" if run.status == "passed" else "failed"
         return f"Data freshness rule '{rule.name}' {outcome}: {condition}."
 
+    @staticmethod
+    def _run_detail_cell(value: Any) -> str:
+        """Escape a value for one cell of the run-details markdown table, so an embedded '|'
+        can't break the table and underscores/asterisks/backticks/brackets in a rule name,
+        filename, or error message aren't misread as markdown emphasis/code/link syntax."""
+        text = "" if value is None else str(value)
+        text = text.replace("\r\n", " ").replace("\n", " ")
+        for char in ("\\", "|", "_", "*", "`", "[", "]"):
+            text = text.replace(char, f"\\{char}")
+        return text
+
     def view_selected_result(self) -> None:
         run = self._selected_result()
         if run is None or not self.project:
@@ -4331,37 +4360,43 @@ class DQToolWebApp:
             return
         rules = {rule.id: rule.name for rule in self.project.storage.list_rules()}
         summary = run.summary_json
-        lines = [
-            f"**Rule:** {rules.get(run.rule_id, f'Rule #{run.rule_id}')}",
-            f"**Source:** {summary.get('source_label', f'Source for rule #{run.rule_id}')}",
-            f"**Status:** {run.status.upper()}",
-            f"**Started:** {self._format_timestamp(run.started_at)}",
-            f"**Finished:** {self._format_timestamp(run.finished_at)}",
-            f"**Runtime:** {self._format_runtime(run.runtime_ms)}",
-            f"**Executed by:** {run.executed_by}",
+        cell = self._run_detail_cell
+        status_color = {"passed": "#16a34a", "failed": "#dc2626", "error": "#dc2626"}.get(run.status, "#d97706")
+        rows: list[tuple[str, str]] = [
+            ("Rule", cell(rules.get(run.rule_id, f"Rule #{run.rule_id}"))),
+            ("Source", cell(summary.get("source_label", f"Source for rule #{run.rule_id}"))),
+            ("Status", f"<span style='color:{status_color}; font-weight:800;'>{run.status.upper()}</span>"),
+            ("Started", cell(self._format_timestamp(run.started_at))),
+            ("Finished", cell(self._format_timestamp(run.finished_at))),
+            ("Runtime", cell(self._format_runtime(run.runtime_ms))),
+            ("Executed by", cell(run.executed_by)),
         ]
         if summary.get("rule_type") == RuleType.DATA_FRESHNESS.value:
-            lines.extend(
+            rows.extend(
                 [
-                    f"**Source rows inspected:** {summary.get('checked_count', 'n/a')}",
-                    f"**Freshness result:** {summary.get('freshness_message', 'n/a')}",
-                    f"**Newest selected value:** {summary.get('latest_value', 'n/a')}",
-                    f"**Age (days):** {summary.get('freshness_age_days', 'n/a')}",
-                    f"**Maximum age (days):** {summary.get('max_age_days', 'n/a')}",
+                    ("Source rows inspected", cell(summary.get("checked_count", "n/a"))),
+                    ("Freshness result", cell(summary.get("freshness_message", "n/a"))),
+                    ("Newest selected value", cell(summary.get("latest_value", "n/a"))),
+                    ("Age (days)", cell(summary.get("freshness_age_days", "n/a"))),
+                    ("Maximum age (days)", cell(summary.get("max_age_days", "n/a"))),
                 ]
             )
         else:
-            lines.extend(
+            rows.extend(
                 [
-                    f"**Checked rows:** {summary.get('checked_count', 'n/a')}",
-                    f"**Failed rows:** {summary.get('failed_count', 'n/a')}",
+                    ("Checked rows", cell(summary.get("checked_count", "n/a"))),
+                    ("Failed rows", cell(summary.get("failed_count", "n/a"))),
                 ]
             )
         if summary.get("error"):
-            lines.append(f"**Error:** {summary['error']}")
+            rows.append(("Error", cell(summary["error"])))
         if run.failed_rows_path:
-            lines.append(f"**Failed rows file:** `{run.failed_rows_path}`")
-        self.result_details.content = "  \n".join(lines)
+            # Just the filename - the full local path is implementation detail, not something
+            # a user needs (or should see) in the UI, and it broke the panel's layout.
+            rows.append(("Failed rows file", cell(Path(run.failed_rows_path).name)))
+        table_lines = ["| Field | Value |", "| --- | --- |"]
+        table_lines.extend(f"| **{label}** | {value} |" for label, value in rows)
+        self.result_details.content = "\n".join(table_lines)
         self.result_details.update()
         self.result_ai_explanation.content = ""
         self.result_ai_explanation.update()
@@ -4466,6 +4501,7 @@ class DQToolWebApp:
         self.failed_rows_column_select.update()
         self.failed_rows_table.columns = []
         self.failed_rows_table.rows = []
+        self._sync_pagination_visibility(self.failed_rows_table, page_size=8)
         self.failed_rows_table.update()
 
     def _filter_failed_rows_preview(self, _event: Any = None) -> None:
@@ -4494,6 +4530,7 @@ class DQToolWebApp:
             {"id": index, **row}
             for index, row in enumerate(filtered_rows)
         ]
+        self._sync_pagination_visibility(self.failed_rows_table, page_size=8)
         self.failed_rows_table.update()
         if self._failed_rows_preview_context:
             previewed = len(self._failed_rows_preview_data)
@@ -5060,8 +5097,10 @@ class DQToolWebApp:
         if not self.project:
             self._results_all_rows = []
             self.rule_summary_table.rows = []
+            self._sync_pagination_visibility(self.rule_summary_table, page_size=10)
             self.rule_summary_table.update()
             self.results_table.rows = []
+            self._sync_pagination_visibility(self.results_table, page_size=10)
             self.results_table.update()
             self._set_chart_options(self.results_outcome_chart, self._empty_chart_options("Open a project to see charts"))
             self._set_chart_options(self.results_trend_chart, self._empty_chart_options("Open a project to see charts"))
@@ -5228,6 +5267,7 @@ class DQToolWebApp:
             rule_name = rule_names.get(run.rule_id, f"Rule #{run.rule_id}")
             options[str(run.id)] = f"{rule_name} | Run {run.id} | {self._format_timestamp(run.started_at)} | {run.status.upper()}"
         self.results_table.rows = rows
+        self._sync_pagination_visibility(self.results_table, page_size=10)
         self.results_table.update()
         self._set_select_options(self.result_select, options, self.selected_run_id)
         self._highlight_table_row(self.results_table, self.result_select.value)
@@ -5648,6 +5688,7 @@ class DQToolWebApp:
             if row["kind"] == "rule":
                 row["checked"] = row["stable_key"] in self._checked_rule_keys
         self.overview_table.rows = self._visible_overview_rows()
+        self._sync_pagination_visibility(self.overview_table, page_size=10)
         self.overview_table.update()
         self._highlight_overview_row()
         self._update_run_checked_button()
@@ -5816,6 +5857,7 @@ class DQToolWebApp:
         for row in self._results_all_rows:
             row["collapsed"] = row["stable_key"] in self._results_collapsed
         self.rule_summary_table.rows = self._visible_results_rows()
+        self._sync_pagination_visibility(self.rule_summary_table, page_size=10)
         self.rule_summary_table.update()
         self._highlight_results_row()
 
@@ -5920,6 +5962,15 @@ class DQToolWebApp:
             row_key="id",
             pagination=pagination,
         ).props("flat bordered wrap-cells").classes("dq-table-wrap w-full mt-4")
+
+    @staticmethod
+    def _sync_pagination_visibility(table: ui.table, page_size: int) -> None:
+        """Hide the "records per page / N-M of T" footer once every row already fits on one
+        page - it's clutter, not information, when there's nothing to actually page through."""
+        if len(table.rows) <= page_size:
+            table.props(add="hide-pagination")
+        else:
+            table.props(remove="hide-pagination")
 
     def _stat_block(
         self,

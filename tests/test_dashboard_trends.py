@@ -5,7 +5,6 @@ import unittest
 from dqtool.models.entities import RuleRun
 from dqtool.web_app import (
     dashboard_daily_metrics,
-    filter_runs_for_rule,
     format_inference_details,
     format_profile_mean,
     format_profile_stat,
@@ -77,17 +76,6 @@ class DashboardTrendTests(unittest.TestCase):
         self.assertEqual(30, len(days))
         self.assertEqual("2026-06-02", days[0])
         self.assertEqual("2026-07-01", days[-1])
-
-    def test_filter_runs_for_rule_excludes_other_rules(self) -> None:
-        runs = [
-            _run("passed", "2026-07-20T10:00:00+00:00", rule_id=1),
-            _run("failed", "2026-07-20T11:00:00+00:00", rule_id=2),
-        ]
-
-        selected_runs = filter_runs_for_rule(runs, 1)
-
-        self.assertEqual([1], [run.rule_id for run in selected_runs])
-        self.assertEqual([], filter_runs_for_rule(runs, None))
 
 
 if __name__ == "__main__":

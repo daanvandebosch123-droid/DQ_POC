@@ -42,15 +42,25 @@ class WebSelectionTests(unittest.TestCase):
         button.enable.assert_called_once_with()
         button.disable.assert_not_called()
 
-    def test_clicking_a_run_chip_selects_that_run(self) -> None:
-        # _populate_result_runs is what rebuilds the chips and redraws run details/failed
-        # rows for the new selection - _select_run just needs to set state and trigger it.
+    def test_clicking_a_history_bar_selects_that_run(self) -> None:
+        # _populate_result_runs is what redraws the history chart and the run details/failed
+        # rows for the new selection - the click handler just resolves the bar to a run id.
         self.app._populate_result_runs = Mock()
+        self.app._result_run_ids = ["9", "12", "15"]
 
-        self.app._select_run(12)
+        self.app._on_run_bar_click(SimpleNamespace(data_index=1))
 
         self.assertEqual("12", self.app.selected_run_id)
         self.app._populate_result_runs.assert_called_once_with()
+
+    def test_clicking_a_history_bar_out_of_range_is_ignored(self) -> None:
+        self.app._populate_result_runs = Mock()
+        self.app._result_run_ids = ["9"]
+
+        self.app._on_run_bar_click(SimpleNamespace(data_index=7))
+
+        self.assertIsNone(self.app.selected_run_id)
+        self.app._populate_result_runs.assert_not_called()
 
     def test_freshness_message_describes_the_newest_value_not_a_failed_row(self) -> None:
         rule = Rule(

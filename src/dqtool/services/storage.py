@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -414,25 +414,70 @@ class Storage:
         with self._session() as conn:
             conn.execute("DELETE FROM rule_runs WHERE id = ?", (run_id,))
 
-    def list_rule_runs(self, limit: int = 100) -> list[RuleRun]:
+    def list_rule_runs(self, limit: int = 100, rule_ids: Sequence[int] | None = None) -> list[RuleRun]:
+        """Newest runs first. Pass `rule_ids` to scope the limit to those rules - without it
+        the limit is global, so one chatty rule can crowd every other rule out of the window."""
         with self._session() as conn:
-            rows = conn.execute("SELECT * FROM rule_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-        return [
-            RuleRun(
-                id=row["id"],
-                rule_id=row["rule_id"],
-                dataset_id=row["dataset_id"],
-                status=row["status"],
-                executed_by=row["executed_by"],
-                started_at=row["started_at"],
-                finished_at=row["finished_at"],
-                summary_json=json.loads(row["summary_json"]),
-                failed_rows_path=row["failed_rows_path"],
-                schedule_id=row["schedule_id"],
-                runtime_ms=row["runtime_ms"],
-            )
+            if rule_ids is None:
+                rows = conn.execute("SELECT * FROM rule_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            elif not rule_ids:
+                rows = []
+            else:
+                placeholders = ",".join("?" for _ in rule_ids)
+                rows = conn.execute(
+                    f"SELECT * FROM rule_runs WHERE rule_id IN ({placeholders}) ORDER BY id DESC LIMIT ?",
+                    (*rule_ids, limit),
+                ).fetchall()
+        return [self._to_rule_run(row) for row in rows]
+
+    def get_rule_run(self, run_id: int) -> RuleRun | None:
+        """Fetch one run by id. Callers must not go looking for a run inside a limited
+        listing instead - a run outside that window would read as deleted."""
+        with self._session() as conn:
+            row = conn.execute("SELECT * FROM rule_runs WHERE id = ?", (run_id,)).fetchone()
+        return self._to_rule_run(row) if row is not None else None
+
+    @staticmethod
+    def _to_rule_run(row: sqlite3.Row) -> RuleRun:
+        return RuleRun(
+            id=row["id"],
+            rule_id=row["rule_id"],
+            dataset_id=row["dataset_id"],
+            status=row["status"],
+            executed_by=row["executed_by"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            summary_json=json.loads(row["summary_json"]),
+            failed_rows_path=row["failed_rows_path"],
+            schedule_id=row["schedule_id"],
+            runtime_ms=row["runtime_ms"],
+        )
+
+    def rule_run_aggregates(self) -> dict[int, dict[str, Any]]:
+        """Per-rule run count plus that rule's own latest run, computed in SQL.
+
+        The Results tree needs this for every rule at once. Deriving it from
+        list_rule_runs() meant a rule whose runs fell outside that global window showed
+        up as never having run, so a failing rule could silently read as "-".
+        """
+        with self._session() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.rule_id, r.runs, latest.status, latest.started_at, latest.summary_json
+                FROM (SELECT rule_id, COUNT(*) AS runs, MAX(id) AS latest_id
+                      FROM rule_runs GROUP BY rule_id) AS r
+                JOIN rule_runs AS latest ON latest.id = r.latest_id
+                """
+            ).fetchall()
+        return {
+            row["rule_id"]: {
+                "runs": row["runs"],
+                "status": row["status"],
+                "started_at": row["started_at"],
+                "summary_json": json.loads(row["summary_json"]),
+            }
             for row in rows
-        ]
+        }
 
     def save_rule_run(self, run: RuleRun) -> int:
         with self._session() as conn:

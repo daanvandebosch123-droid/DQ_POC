@@ -91,6 +91,9 @@ RUN_STATUS_STYLES = {
 }
 CONNECTION_TYPE_LABELS = {"csv": "CSV", "oracle": "Oracle", "sqlserver": "SQL Server", "db2": "DB2", "sybase": "Sybase"}
 
+# How far back the Results tab's execution-history chart reaches for one rule or group.
+RUN_HISTORY_LIMIT = 2000
+
 CHART_MUTED = "#837d74"
 CHART_GRID = "#e2ded7"
 CHART_SERIES = "#6f6960"
@@ -166,13 +169,6 @@ def dashboard_daily_metrics(runs: list[RuleRun]) -> tuple[list[str], list[float 
         values = bucket["runtimes"]
         average_runtimes.append(round(sum(values) / len(values)) if values else None)
     return days, pass_rates, volumes, failed_rows, average_runtimes
-
-
-def filter_runs_for_rule(runs: list[RuleRun], rule_id: int | None) -> list[RuleRun]:
-    """Return only the execution history belonging to one rule."""
-    if rule_id is None:
-        return []
-    return [run for run in runs if run.rule_id == rule_id]
 
 
 def missing_or_blank_percent(stats: dict[str, Any]) -> float:
@@ -420,8 +416,7 @@ class DQToolWebApp:
         self.quality_trend_chart: ui.echart
         self.failed_rows_trend_chart: ui.echart
         self.runtime_trend_chart: ui.echart
-        self.results_outcome_chart: ui.echart
-        self.results_trend_chart: ui.echart
+        self.run_history_chart: ui.echart
         self.anomaly_rowcount_chart: ui.echart
 
         self.rules_count: ui.label
@@ -438,7 +433,10 @@ class DQToolWebApp:
         self.connections_table: ui.table
         self.overview_table: ui.table
         self.rule_summary_table: ui.table
-        self.run_chip_row: ui.row
+        self.run_history_caption: ui.label
+        # Run ids in the same order as the history chart's bars, so a bar click's
+        # data_index resolves back to a run - see _on_run_bar_click.
+        self._result_run_ids: list[str] = []
         self.users_table: ui.table
         self.preview_table: ui.table
         self.failed_rows_table: ui.table
@@ -1173,16 +1171,18 @@ class DQToolWebApp:
                         with ui.row().classes("w-full items-center justify-between gap-2"):
                             with ui.column().classes("gap-0"):
                                 ui.label("RUNS").classes("dq-eyebrow")
-                                ui.label("Every run, newest first").classes("dq-panel-title text-lg font-bold")
+                                ui.label("Execution history").classes("dq-panel-title text-lg font-bold")
                             ui.button("Delete", icon="delete", on_click=self.delete_selected_result).props(
                                 "outline dense no-caps color=negative"
                             )
-                        # Rebuilt by _render_run_chips: one small chip per run, colored by status,
-                        # filled when it's the current selection. Picking a chip is now the only
-                        # way to choose a run - see _select_run.
-                        self.run_chip_row = ui.row().classes(
-                            "w-full flex-nowrap gap-2 overflow-x-auto pb-1 mt-2 dq-run-chip-row"
-                        )
+                        # One bar per run, oldest to newest: colour is the status, height is the
+                        # failed-row count, and clicking a bar opens that run below. Doubles as the
+                        # history visualisation, so there's no separate trend chart - see
+                        # _render_run_history.
+                        self.run_history_chart = ui.echart(
+                            self._empty_chart_options("No runs yet"), on_point_click=self._on_run_bar_click
+                        ).classes("w-full h-[140px] mt-1")
+                        self.run_history_caption = ui.label("").classes("dq-panel-copy text-xs")
                     with ui.card().classes("dq-soft-card w-full p-6"):
                         with ui.row().classes("w-full items-center justify-between gap-2"):
                             ui.label("Run details").classes("dq-panel-title text-lg font-bold")
@@ -1209,19 +1209,6 @@ class DQToolWebApp:
                         # Full width now that it's not squeezed next to Run details - this table is
                         # where analysts actually spend their time.
                         self.failed_rows_table = self._build_table([], pagination=10)
-                    with ui.card().classes("dq-soft-card w-full p-2"):
-                        with ui.expansion("Trends", icon="insights", value=False).classes("w-full"):
-                            with ui.row().classes("w-full items-stretch gap-4 p-4"):
-                                with ui.column().classes("w-full lg:w-[calc(50%-8px)] gap-1"):
-                                    ui.label("Run outcomes per day").classes("dq-panel-title text-sm font-bold")
-                                    self.results_outcome_chart = ui.echart(
-                                        self._empty_chart_options("No runs yet")
-                                    ).classes("w-full h-[220px]")
-                                with ui.column().classes("w-full lg:w-[calc(50%-8px)] gap-1"):
-                                    ui.label("Failed rows over time").classes("dq-panel-title text-sm font-bold")
-                                    self.results_trend_chart = ui.echart(
-                                        self._empty_chart_options("Select a rule")
-                                    ).classes("w-full h-[220px]")
 
     def _build_anomalies_tab(self) -> None:
         with ui.column().classes("w-full gap-4"):
@@ -4827,7 +4814,7 @@ class DQToolWebApp:
         self._set_chart_options(
             self.runtime_trend_chart,
             {
-                "tooltip": {"trigger": "axis", "valueFormatter": "(value) => value == null ? '-' : value + ' ms'"},
+                "tooltip": {"trigger": "axis", ":valueFormatter": "(value) => value == null ? '-' : value + ' ms'"},
                 "grid": {"left": 8, "right": 48, "top": 18, "bottom": 38, "containLabel": True},
                 "xAxis": {"type": "category", "data": days, "axisLabel": {"color": CHART_MUTED, "rotate": 30, "fontSize": 10}},
                 "yAxis": {"type": "value", "name": "ms", "axisLabel": {"color": CHART_MUTED, "formatter": "{value} ms"}, "splitLine": {"lineStyle": {"color": CHART_GRID}}},
@@ -4835,96 +4822,6 @@ class DQToolWebApp:
             },
         )
 
-    def _update_results_outcome_chart(self, runs: list[RuleRun]) -> None:
-        selected_rule_id = self._selected_result_rule_id()
-        if selected_rule_id is None:
-            self._set_chart_options(self.results_outcome_chart, self._empty_chart_options("Select a rule"))
-            return
-        runs = filter_runs_for_rule(runs, selected_rule_id)
-        if not runs:
-            self._set_chart_options(self.results_outcome_chart, self._empty_chart_options("No runs yet for this rule"))
-            return
-        per_day: dict[str, dict[str, int]] = {}
-        for run in runs:
-            day = str(run.started_at)[:10]
-            bucket = per_day.setdefault(day, {})
-            bucket[run.status] = bucket.get(run.status, 0) + 1
-        days = sorted(per_day)[-14:]
-        self._set_chart_options(
-            self.results_outcome_chart,
-            {
-                "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
-                "legend": {"bottom": 0, "textStyle": {"color": "#5c564d"}},
-                "grid": {"left": 8, "right": 16, "top": 12, "bottom": 32, "containLabel": True},
-                "xAxis": {"type": "category", "data": days, "axisLabel": {"color": CHART_MUTED, "fontSize": 10}},
-                "yAxis": {
-                    "type": "value",
-                    "minInterval": 1,
-                    "splitLine": {"lineStyle": {"color": CHART_GRID}},
-                    "axisLabel": {"color": CHART_MUTED},
-                },
-                "series": [
-                    {
-                        "name": label,
-                        "type": "bar",
-                        "stack": "runs",
-                        "data": [per_day[day].get(status, 0) for day in days],
-                        "itemStyle": {"color": color, "borderColor": "#ffffff", "borderWidth": 1},
-                        "barMaxWidth": 26,
-                    }
-                    for status, (label, color) in RUN_STATUS_STYLES.items()
-                ],
-            },
-        )
-
-    def _update_result_trend_chart(self) -> None:
-        rule_id = self._selected_result_rule_id()
-        if rule_id is None:
-            self._set_chart_options(self.results_trend_chart, self._empty_chart_options("Select a rule"))
-            return
-        history = sorted(
-            (
-                item
-                for item in self.project.storage.list_rule_runs(limit=500)
-                if item.rule_id == rule_id and item.status != "error"
-            ),
-            key=lambda item: item.started_at,
-        )
-        if not history:
-            self._set_chart_options(
-                self.results_trend_chart, self._empty_chart_options("No completed executions for this rule yet")
-            )
-            return
-        rule_names = {rule.id: rule.name for rule in self.project.storage.list_rules() if rule.id is not None}
-        rule_name = rule_names.get(rule_id, f"Deleted rule #{rule_id}")
-        self._set_chart_options(
-            self.results_trend_chart,
-            {
-                "tooltip": {"trigger": "axis"},
-                "grid": {"left": 8, "right": 24, "top": 16, "bottom": 8, "containLabel": True},
-                "xAxis": {
-                    "type": "category",
-                    "data": [self._format_timestamp(item.started_at) for item in history],
-                    "axisLabel": {"color": CHART_MUTED, "rotate": 30, "fontSize": 10},
-                },
-                "yAxis": {
-                    "type": "value",
-                    "minInterval": 1,
-                    "splitLine": {"lineStyle": {"color": CHART_GRID}},
-                    "axisLabel": {"color": CHART_MUTED},
-                },
-                "series": [
-                    {
-                        "name": f"Failed rows · {rule_name}",
-                        "type": "line",
-                        "data": [int(item.summary_json.get("failed_count") or 0) for item in history],
-                        "lineStyle": {"width": 2, "color": CHART_SERIES},
-                        "itemStyle": {"color": CHART_SERIES},
-                        "symbolSize": 8,
-                    }
-                ],
-            },
-        )
 
     def _update_anomaly_charts(self, profile: dict[str, Any], source_key: str) -> None:
         history = self.project.storage.list_source_profiles(source_key) if self.project else []
@@ -5147,12 +5044,12 @@ class DQToolWebApp:
             self.rule_summary_table.update()
             self.selected_result_rule_id = None
             self.selected_run_id = None
-            self._render_run_chips([], {})
+            self._render_run_history([], {})
             self._reset_result_detail_panels("Open a project to see results.")
-            self._set_chart_options(self.results_outcome_chart, self._empty_chart_options("Open a project to see charts"))
-            self._set_chart_options(self.results_trend_chart, self._empty_chart_options("Open a project to see charts"))
             return
-        runs = self.project.storage.list_rule_runs()
+        # Per-rule aggregates come straight from SQL: every rule gets its own latest run and
+        # run count, so a rule can't be crowded out of the picture by a busier one.
+        aggregates = self.project.storage.rule_run_aggregates()
         rules = self._visible_rules()
         rules_by_id = {rule.id: rule for rule in rules if rule.id is not None}
         groups = self._visible_groups()
@@ -5160,23 +5057,20 @@ class DQToolWebApp:
         group_parent_names = self._group_parent_names(groups)
         root_group_ids = [item.id for item in groups if item.id is not None and item.id not in group_parent_names]
 
-        runs_by_rule_id: dict[int, list[RuleRun]] = {}
-        for run in runs:  # newest first, so each rule's first entry is its latest run
-            runs_by_rule_id.setdefault(run.rule_id, []).append(run)
         status_severity = {"passed": 0, "failed": 1, "error": 2}
 
         def aggregate_stats(rule_ids: list[int]) -> dict[str, Any]:
-            latest_by_rule = {rule_id: runs_by_rule_id[rule_id][0] for rule_id in rule_ids if runs_by_rule_id.get(rule_id)}
-            total_runs = sum(len(runs_by_rule_id.get(rule_id, [])) for rule_id in rule_ids)
+            latest_by_rule = {rule_id: aggregates[rule_id] for rule_id in rule_ids if rule_id in aggregates}
+            total_runs = sum(aggregates.get(rule_id, {}).get("runs", 0) for rule_id in rule_ids)
             if not latest_by_rule:
                 return {"runs": total_runs, "last_status": "-", "last_run": "-", "last_failed": "-"}
-            worst = max(latest_by_rule.values(), key=lambda run: status_severity.get(run.status, 0))
-            newest = max(latest_by_rule.values(), key=lambda run: run.started_at)
-            total_failed = sum(int(run.summary_json.get("failed_count") or 0) for run in latest_by_rule.values())
+            worst = max(latest_by_rule.values(), key=lambda item: status_severity.get(item["status"], 0))
+            newest = max(latest_by_rule.values(), key=lambda item: item["started_at"])
+            total_failed = sum(int(item["summary_json"].get("failed_count") or 0) for item in latest_by_rule.values())
             return {
                 "runs": total_runs,
-                "last_status": worst.status.upper(),
-                "last_run": self._format_timestamp(newest.started_at),
+                "last_status": str(worst["status"]).upper(),
+                "last_run": self._format_timestamp(newest["started_at"]),
                 "last_failed": total_failed,
             }
 
@@ -5212,8 +5106,8 @@ class DQToolWebApp:
             nonlocal counter
             referenced_rule_ids.add(rule.id)
             stats = aggregate_stats([rule.id])
-            rule_runs = runs_by_rule_id.get(rule.id, [])
-            details = rule_runs[0].summary_json.get("source_label", "-") if rule_runs else "-"
+            latest = aggregates.get(rule.id)
+            details = latest["summary_json"].get("source_label", "-") if latest else "-"
             counter += 1
             rows.append(
                 {
@@ -5272,8 +5166,6 @@ class DQToolWebApp:
         self.selected_result_rule_id = self._resolve_selection(self.selected_result_rule_id, valid_keys)
         self._refresh_results_view()
         self._populate_result_runs()
-        self._update_results_outcome_chart(runs)
-        self._update_result_trend_chart()
 
     def _selected_result_rule_id(self) -> int | None:
         selected = self.selected_result_rule_id if self.project else None
@@ -5296,13 +5188,14 @@ class DQToolWebApp:
             selected_rule_ids = {rule.id for rule in resolve_group_rules(group, groups_by_id, rules_by_id)[0]} if group else set()
         else:
             selected_rule_ids = set()
-        # newest first, matching storage's own ordering - so run chips render newest-to-oldest.
-        runs = [run for run in self.project.storage.list_rule_runs() if run.rule_id in selected_rule_ids]
+        # Scoped to the selected rule(s) so the history depth doesn't depend on how busy
+        # other rules have been; newest first, matching storage's own ordering.
+        runs = self.project.storage.list_rule_runs(limit=RUN_HISTORY_LIMIT, rule_ids=sorted(selected_rule_ids))
         rule_names = {rule_id: rule.name for rule_id, rule in rules_by_id.items()}
         self.selected_run_id = self._resolve_selection(self.selected_run_id, [str(run.id) for run in runs])
-        # Only label chips with their rule name when a group mixes runs from several rules -
-        # for a single rule it's already unambiguous, and the label stays short.
-        self._render_run_chips(runs, rule_names, show_rule_name=is_group)
+        # Only name the rule in a bar's tooltip when a group mixes runs from several rules -
+        # for a single rule it's already unambiguous.
+        self._render_run_history(runs, rule_names, show_rule_name=is_group)
         self._show_selected_result_context()
 
     def _populate_users(self) -> None:
@@ -5650,10 +5543,12 @@ class DQToolWebApp:
             ui.notify("Select a rule or group first.", type="warning")
 
     def _selected_result(self) -> RuleRun | None:
+        # Looked up by id rather than searched for in a listing: a run older than the
+        # listing's limit would otherwise look deleted, and the details panel would keep
+        # showing whichever run was open before - possibly another rule's.
         if not self.project or not self.selected_run_id:
             return None
-        run_id = int(self.selected_run_id)
-        return next((item for item in self.project.storage.list_rule_runs() if item.id == run_id), None)
+        return self.project.storage.get_rule_run(int(self.selected_run_id))
 
     def _visible_connections(self) -> list[Connection]:
         if not self.project:
@@ -5866,11 +5761,9 @@ class DQToolWebApp:
         self.selected_result_rule_id = row["stable_key"]
         # A new rule/group selection invalidates whatever run was selected before -
         # _populate_result_runs resolves it (falling back to the latest run) and redraws
-        # the chips, run details, and failed rows for it.
+        # the history chart, run details, and failed rows for it.
         self._highlight_results_row()
         self._populate_result_runs()
-        self._update_results_outcome_chart(self.project.storage.list_rule_runs() if self.project else [])
-        self._update_result_trend_chart()
 
     def _refresh_results_view(self) -> None:
         for row in self._results_all_rows:
@@ -5896,34 +5789,112 @@ class DQToolWebApp:
         self._refresh_results_view()
 
     def _select_run(self, run_id: int) -> None:
-        """Handles a run-chip click - the only way to pick a run now (see _render_run_chips)."""
+        """Opens a run - reached by clicking its bar in the history chart."""
         self.selected_run_id = str(run_id)
         self._populate_result_runs()
 
-    def _render_run_chips(
+    def _on_run_bar_click(self, event: events.EChartPointClickEventArguments) -> None:
+        """Maps a clicked bar back to its run via the index of the chart's own series data."""
+        index = event.data_index
+        if 0 <= index < len(self._result_run_ids):
+            self._select_run(int(self._result_run_ids[index]))
+
+    def _render_run_history(
         self, runs: list[RuleRun], rule_names: dict[int, str], *, show_rule_name: bool = False
     ) -> None:
-        """Rebuild the horizontal run picker: one small chip per run, colored by status,
-        filled when it's the current selection. Runs already arrive newest-first."""
-        status_color = {"passed": "positive", "failed": "negative", "error": "warning"}
-        status_icon = {"passed": "check", "failed": "close", "error": "priority_high"}
-        self.run_chip_row.clear()
-        with self.run_chip_row:
-            if not runs:
-                ui.label("No runs yet.").classes("dq-panel-copy text-sm")
-                return
-            for run in runs:
-                is_selected = str(run.id) == self.selected_run_id
-                label = self._format_short_timestamp(run.started_at)
-                if show_rule_name:
-                    label = f"{rule_names.get(run.rule_id, f'Rule #{run.rule_id}')} · {label}"
-                variant = "unelevated" if is_selected else "outline"
-                color = status_color.get(run.status, "grey-6")
-                ui.button(
-                    label,
-                    icon=status_icon.get(run.status, "help"),
-                    on_click=lambda _e, run_id=run.id: self._select_run(run_id),
-                ).props(f"{variant} dense no-caps color={color}").classes("shrink-0")
+        """Draw the run history as one bar per run: colour is the status, height is the
+        failed-row count, and the current selection is outlined. Doubles as the picker
+        (see _on_run_bar_click), which is why there's no separate trend chart."""
+        # Storage hands runs back newest-first; the chart reads oldest -> newest.
+        ordered = list(reversed(runs))
+        self._result_run_ids = [str(run.id) for run in ordered]
+        if not ordered:
+            self.run_history_caption.text = ""
+            self.run_history_caption.update()
+            self._set_chart_options(self.run_history_chart, self._empty_chart_options("No runs yet"))
+            return
+
+        status_colors = {status: color for status, (_label, color) in RUN_STATUS_STYLES.items()}
+        data = []
+        for run in ordered:
+            summary = run.summary_json
+            failed = int(summary.get("failed_count") or 0)
+            checked = int(summary.get("checked_count") or 0)
+            tip = [] if not show_rule_name else [rule_names.get(run.rule_id, f"Rule #{run.rule_id}")]
+            tip.append(self._format_timestamp(run.started_at))
+            tip.append(f"{run.status.upper()} - {failed:,} failed of {checked:,} checked")
+            tip.append(self._format_runtime(run.runtime_ms))
+            item_style: dict[str, Any] = {"color": status_colors.get(run.status, CHART_SERIES)}
+            if str(run.id) == self.selected_run_id:
+                item_style["borderColor"] = "#37332e"
+                item_style["borderWidth"] = 2
+            data.append({"value": failed, "tip": "<br>".join(tip), "itemStyle": item_style})
+
+        # Keep the window centred on whatever is selected, so clicking a bar deep in the
+        # history doesn't snap the view back to the newest runs.
+        window = 60
+        last_index = len(ordered) - 1
+        if len(ordered) <= window:
+            start_index, end_index = 0, last_index
+        else:
+            centre = self._result_run_ids.index(self.selected_run_id) if self.selected_run_id in self._result_run_ids else last_index
+            start_index = max(0, min(centre - window // 2, len(ordered) - window))
+            end_index = start_index + window - 1
+
+        self.run_history_caption.text = (
+            f"{len(ordered):,} run{'' if len(ordered) == 1 else 's'} - click a bar to open one"
+            + (" - drag the bar below to see older runs" if len(ordered) > window else "")
+        )
+        self.run_history_caption.update()
+        self._set_chart_options(
+            self.run_history_chart,
+            {
+                # NiceGUI only turns an option string into a real function when the key is
+                # prefixed with ":" - without it ECharts renders the source text verbatim.
+                "tooltip": {"trigger": "item", ":formatter": "(params) => params.data.tip"},
+                "grid": {"left": 4, "right": 8, "top": 10, "bottom": 46, "containLabel": True},
+                "xAxis": {
+                    "type": "category",
+                    "data": [self._format_short_timestamp(run.started_at) for run in ordered],
+                    "axisLabel": {"color": CHART_MUTED, "fontSize": 9, "hideOverlap": True},
+                    "axisTick": {"show": False},
+                },
+                "yAxis": {
+                    "type": "value",
+                    "name": "Failed rows",
+                    "nameTextStyle": {"color": CHART_MUTED, "fontSize": 9},
+                    "minInterval": 1,
+                    "axisLabel": {"color": CHART_MUTED, "fontSize": 9},
+                    "splitLine": {"lineStyle": {"color": CHART_GRID}},
+                },
+                "dataZoom": [
+                    {"type": "inside", "startValue": start_index, "endValue": end_index},
+                    {
+                        "type": "slider",
+                        "startValue": start_index,
+                        "endValue": end_index,
+                        "height": 16,
+                        "bottom": 4,
+                        "brushSelect": False,
+                        "borderColor": CHART_GRID,
+                        "fillerColor": "rgba(111, 105, 96, .15)",
+                        "handleStyle": {"color": CHART_MUTED},
+                        "textStyle": {"color": CHART_MUTED, "fontSize": 9},
+                    },
+                ],
+                "series": [
+                    {
+                        "type": "bar",
+                        "data": data,
+                        # Passed runs have 0 failed rows - without a floor they'd be invisible
+                        # and unclickable, so give every bar a small stub instead of faking values.
+                        "barMinHeight": 4,
+                        "barMaxWidth": 16,
+                        "itemStyle": {"borderRadius": [2, 2, 0, 0]},
+                    }
+                ],
+            },
+        )
 
     def _show_selected_result_context(self) -> None:
         if self.selected_run_id is None:

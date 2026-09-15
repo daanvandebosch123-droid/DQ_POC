@@ -3,7 +3,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event
 from unittest.mock import MagicMock, patch
+
+import duckdb
 
 from dqtool.models.entities import Connection, ConnectionType
 from dqtool.services.connectors import ConnectorService
@@ -73,6 +76,145 @@ class ProfilingServiceTests(unittest.TestCase):
     def test_profile_stops_before_opening_source_when_abort_is_requested(self) -> None:
         with self.assertRaises(ProfileAborted):
             self.service.profile_rule_source(self.source_config, {11: self.connection}, should_abort=lambda: True)
+
+    def test_csv_abort_stops_at_each_requested_stage_and_closes_connection(self) -> None:
+        for stage_to_abort in ("Calculating column statistics", "Content analysis: name", "Frequency analysis: name"):
+            with self.subTest(stage=stage_to_abort):
+                stopped = Event()
+                updates = []
+
+                def progress(_value, stage, updates=updates, target=stage_to_abort, stopped=stopped):
+                    updates.append(stage)
+                    if stage == target:
+                        stopped.set()
+
+                raw_connection = duckdb.connect()
+                connection = MagicMock(wraps=raw_connection)
+                type(connection).description = property(lambda _self, raw=raw_connection: raw.description)
+                with patch("dqtool.services.profiling.duckdb.connect", return_value=connection):
+                    with self.assertRaises(ProfileAborted):
+                        self.service.profile_rule_source(
+                            self.source_config, {11: self.connection}, progress_callback=progress,
+                            should_abort=stopped.is_set,
+                        )
+                self.assertEqual(stage_to_abort, updates[-1])
+                self.assertNotIn("Profile complete", updates)
+                connection.close.assert_called_once()
+
+    def test_csv_summary_is_computed_once(self) -> None:
+        raw_connection = duckdb.connect()
+        connection = MagicMock(wraps=raw_connection)
+        type(connection).description = property(lambda _self: raw_connection.description)
+        with patch("dqtool.services.profiling.duckdb.connect", return_value=connection):
+            self.service.profile_rule_source(self.source_config, {11: self.connection})
+        summaries = [call for call in connection.execute.call_args_list if call.args[0].startswith("SUMMARIZE")]
+        self.assertEqual(1, len(summaries))
+
+    def test_database_cursor_stays_open_and_is_closed_on_success_error_and_abort(self) -> None:
+        connection = Connection(id=50, name="oracle", connection_type=ConnectionType.ORACLE, owner_username="tester")
+        config = {"source_connection_id": 50, "source_kind": "oracle_table", "source_name": "orders"}
+        for outcome in ("success", "error", "abort"):
+            with self.subTest(outcome=outcome):
+                state = {"open": False, "abort": False}
+                cursor = MagicMock()
+                cursor.description = [("amount", "NUMBER")]
+                cursor.fetchone.side_effect = [(2,), (2, 2, 1, 2, 1.5, 0.5)]
+                db_connection = MagicMock()
+                context = db_connection.cursor.return_value
+
+                def enter(*_args, state=state, cursor=cursor):
+                    state["open"] = True
+                    return cursor
+
+                def leave(*_args, state=state):
+                    state["open"] = False
+                    return False
+
+                def execute(sql, state=state, outcome=outcome):
+                    self.assertTrue(state["open"], "Query used a closed cursor")
+                    if "COUNT(DISTINCT" in sql:
+                        if outcome == "error":
+                            raise RuntimeError("aggregate failed")
+                        state["abort"] = outcome == "abort"
+
+                context.__enter__.side_effect = enter
+                context.__exit__.side_effect = leave
+                cursor.execute.side_effect = execute
+                with patch.object(self.service.connector_service, "connect_database", return_value=db_connection):
+                    if outcome == "success":
+                        profile = self.service.profile_rule_source(config, {50: connection})
+                        self.assertEqual(1.5, profile["columns"]["amount"]["mean"])
+                    else:
+                        expected = ProfileAborted if outcome == "abort" else RuntimeError
+                        with self.assertRaises(expected):
+                            self.service.profile_rule_source(
+                                config, {50: connection}, should_abort=lambda state=state: state["abort"],
+                            )
+                self.assertFalse(state["open"])
+                context.__exit__.assert_called_once()
+                db_connection.close.assert_called_once()
+
+    def test_database_abort_between_frequency_columns_stops_remaining_queries(self) -> None:
+        connection = Connection(id=51, name="db2", connection_type=ConnectionType.DB2, owner_username="tester")
+        config = {"source_connection_id": 51, "source_kind": "oracle_table", "source_name": "orders"}
+        cursor = MagicMock()
+        cursor.description = [("a", str), ("b", str)]
+        cursor.fetchone.side_effect = [(2,), (2, 2, "A", "B", 0, 2, 2, "C", "D", 0)]
+        cursor.fetchmany.side_effect = [[("A", "C"), ("B", "D")], []]
+        cursor.fetchall.return_value = [("A", 1), ("B", 1)]
+        db_connection = MagicMock()
+        db_connection.cursor.return_value.__enter__.return_value = cursor
+        stopped = False
+
+        def progress(_value, stage):
+            nonlocal stopped
+            stopped = stage == "Frequency analysis: a"
+
+        with patch.object(self.service.connector_service, "connect_database", return_value=db_connection):
+            with self.assertRaises(ProfileAborted):
+                self.service.profile_rule_source(
+                    config, {51: connection}, progress_callback=progress, should_abort=lambda: stopped,
+                )
+        queries = [call.args[0] for call in cursor.execute.call_args_list if "GROUP BY" in call.args[0]]
+        self.assertEqual(1, len(queries))
+        self.assertIn('q."a"', queries[0])
+        db_connection.close.assert_called_once()
+
+    def test_frequency_coverage_explains_skips_and_preserves_full_counts(self) -> None:
+        columns = {
+            "code": {"type": "VARCHAR", "distinct_count": 101},
+            "status": {"type": "VARCHAR", "distinct_count": 1},
+            "empty": {"type": "VARCHAR", "distinct_count": 0},
+            "number": {"type": "BIGINT", "distinct_count": 101},
+        }
+        connection = Connection(id=52, name="db2", connection_type=ConnectionType.DB2, owner_username="tester")
+        with duckdb.connect() as con:
+            con.execute("CREATE VIEW profile_view AS SELECT 'code-' || range AS code, 'active' AS status FROM range(101)")
+            self.service._add_duckdb_frequency_analysis(con, columns, 101, [])
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [("active", 101)]
+        database_columns = {name: {key: value for key, value in stats.items() if key in {"type", "distinct_count"}}
+                            for name, stats in columns.items()}
+        self.service._add_database_frequency_analysis(
+            cursor, "SELECT * FROM orders", connection, {"code", "status", "empty"}, database_columns, 101, [],
+        )
+        for result in (columns, database_columns):
+            self.assertEqual("Skipped: more than 100 distinct values", result["code"]["frequency_status"])
+            self.assertEqual("No non-null values", result["empty"]["frequency_status"])
+            self.assertEqual("Not applicable: non-text column", result["number"]["frequency_status"])
+            self.assertEqual(101, result["status"]["top_values"][0]["count"])
+            self.assertEqual(1.0, result["status"]["top_values"][0]["share"])
+        cursor.execute.assert_called_once()
+
+    def test_inference_match_rate_describes_selected_date_type(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchmany.side_effect = [[("20260101",)] * 4 + [("42",)], []]
+        columns = {"code": {"inferred_type": "text", "non_null_count": 5}}
+        self.service._infer_database_text_stats(
+            cursor, "SELECT * FROM orders", self.connection, {"code"}, columns, 5, sample_limit=None,
+        )
+        self.assertEqual("date/time", columns["code"]["inferred_type"])
+        self.assertEqual(0.8, columns["code"]["inference_confidence"])
 
     def test_placeholder_detection_flags_masked_values(self) -> None:
         findings = _placeholder_findings("status", [{"value": "***", "count": 9, "share": 0.9}])

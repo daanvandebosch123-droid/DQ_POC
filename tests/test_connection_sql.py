@@ -4,9 +4,44 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import duckdb
+
 from dqtool.models.entities import Connection, ConnectionType, Rule, RuleType
 from dqtool.services.connectors import ConnectorService
 from dqtool.services.execution import ExecutionService
+
+
+class SingleCsvSqlTests(unittest.TestCase):
+    def test_queries_with_limits_semicolons_and_comments_execute(self) -> None:
+        service = ExecutionService(ConnectorService())
+        queries = (
+            ("SELECT * FROM dataset_view LIMIT 10", 10),
+            ("SELECT * FROM dataset_view;  ", 1000),
+            ("SELECT * FROM dataset_view LIMIT 600;", 600),
+            ("SELECT * FROM dataset_view -- a comment", 1000),
+            ("WITH small AS (SELECT * FROM dataset_view LIMIT 3) SELECT * FROM small;", 3),
+        )
+        for sql, expected_count in queries:
+            with self.subTest(sql=sql):
+                rule = Rule(
+                    id=1, name="custom", rule_type=RuleType.CUSTOM_SQL_FAIL_ROWS,
+                    dataset_id=None, owner_username="tester", config={"sql": sql},
+                )
+                summary, preview = service._run_duckdb_rule(rule, lambda con: con.sql("SELECT * FROM range(1000)"))
+                self.assertEqual(1000, summary["checked_count"])
+                self.assertEqual(expected_count, summary["failed_count"])
+                self.assertEqual(min(expected_count, 500), len(preview))
+
+    def test_metric_query_accepts_a_trailing_semicolon(self) -> None:
+        rule = Rule(
+            id=1, name="metric", rule_type=RuleType.CUSTOM_SQL_THRESHOLD, dataset_id=None,
+            owner_username="tester", config={"sql": "SELECT COUNT(*) AS value FROM dataset_view;", "threshold": 2},
+        )
+        summary, preview = ExecutionService(ConnectorService())._run_duckdb_rule(
+            rule, lambda con: con.sql("SELECT * FROM range(3)"),
+        )
+        self.assertEqual(1, summary["failed_count"])
+        self.assertEqual([{"value": 3}], preview)
 
 
 class ConnectionSqlRuleTests(unittest.TestCase):
@@ -86,6 +121,22 @@ class ConnectionSqlRuleTests(unittest.TestCase):
         rule = self._rule("SELECT * FROM t_2024_sales_data WHERE id IS NULL")
         runs = self.service.run_rules([rule], {}, {1: self.connection}, self.results_dir, "tester")
         self.assertEqual("passed", runs[0].status, runs[0].summary_json.get("error"))
+
+    def test_displayed_view_names_match_registered_names_when_filenames_collide(self) -> None:
+        base = Path(self._tmp.name)
+        (base / "sales-data.csv").write_text("id\n1\n", encoding="utf-8")
+        (base / "sales data.csv").write_text("id\n2\n", encoding="utf-8")
+        connector = self.service.connector_service
+        displayed = connector.csv_connection_view_paths(self.connection)
+        with duckdb.connect() as con:
+            registered = connector.register_connection_views(con, self.connection)
+            self.assertEqual(displayed, registered)
+            self.assertEqual((2,), con.execute("SELECT id FROM sales_data").fetchone())
+            self.assertEqual((1,), con.execute("SELECT id FROM sales_data_2").fetchone())
+
+    def test_view_names_avoid_case_insensitive_collisions(self) -> None:
+        connector = self.service.connector_service
+        self.assertEqual("ORDERS_2", connector._view_name_for_file(Path("ORDERS.csv"), {"orders": "orders.csv"}))
 
 
 if __name__ == "__main__":

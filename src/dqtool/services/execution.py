@@ -346,7 +346,7 @@ class ExecutionService:
             relation_name = "dataset_view"
             con.sql(f"CREATE OR REPLACE VIEW {relation_name} AS {relation.sql_query()}")
             failed_sql, summary_sql = self._build_rule_sql(rule, relation_name, dialect="duckdb")
-            cursor = con.execute(f"{failed_sql} LIMIT {FAILED_ROW_LIMIT}")
+            cursor = con.execute(f"SELECT * FROM ({failed_sql}\n) failed_preview LIMIT {FAILED_ROW_LIMIT}")
             columns = [column[0] for column in cursor.description]
             failed_preview = [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
             summary_row = con.execute(summary_sql).fetchone()
@@ -820,13 +820,14 @@ class ExecutionService:
                 predicates.append(f"{column} > {self._date_literal(config['max_date'], dialect)}")
             failed_sql = f"SELECT * FROM {relation_name} WHERE {' OR '.join(predicates)}"
         elif rule.rule_type == RuleType.CUSTOM_SQL_FAIL_ROWS:
-            failed_sql = config["sql"]
+            failed_sql = str(config["sql"]).strip().rstrip(";").rstrip()
         elif rule.rule_type == RuleType.CUSTOM_SQL_THRESHOLD:
             operator = _COMPARISON_OPERATORS.get(str(config.get("operator", ">")))
             if operator is None:
                 raise ValueError("The operator setting must be one of: >, >=, <, <=, ==, !=.")
             threshold = self._sql_number(config["threshold"], "threshold")
-            failed_sql = f"SELECT * FROM ({config['sql']}) metric WHERE metric.value {operator} {threshold}"
+            metric_sql = str(config["sql"]).strip().rstrip(";").rstrip()
+            failed_sql = f"SELECT * FROM ({metric_sql}\n) metric WHERE metric.value {operator} {threshold}"
         elif rule.rule_type == RuleType.REFERENTIAL_INTEGRITY:
             raise RuntimeError("Referential integrity rules require source and target selections.")
         elif rule.rule_type == RuleType.KEYED_COMPARISON:
@@ -844,7 +845,7 @@ class ExecutionService:
             raise RuntimeError(f"Unsupported rule type: {rule.rule_type}")
         summary_sql = (
             f"SELECT (SELECT COUNT(*) FROM {relation_name}) AS checked_count, "
-            f"(SELECT COUNT(*) FROM ({failed_sql}) failed) AS failed_count"
+            f"(SELECT COUNT(*) FROM ({failed_sql}\n) failed) AS failed_count"
             f"{self._summary_from_clause(dialect)}"
         )
         return failed_sql, summary_sql

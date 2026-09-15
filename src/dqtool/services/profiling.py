@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import date, datetime
 from typing import Any
 
@@ -19,6 +20,45 @@ AbortCallback = Callable[[], bool]
 
 class ProfileAborted(RuntimeError):
     """Raised when a caller asks a long-running profile to stop safely."""
+
+
+class _ProfileQuery:
+    """Check cancellation before and after each query or fetch on this worker.
+
+    The owner retains responsibility for closing the underlying connection/cursor.
+    An operation already inside the driver is allowed to return before stopping.
+    """
+
+    def __init__(self, query: Any, should_abort: AbortCallback | None) -> None:
+        self._query = query
+        self._should_abort = should_abort
+
+    def _call(self, method: str, *args: Any) -> Any:
+        ProfilingService._raise_if_aborted(self._should_abort)
+        result = getattr(self._query, method)(*args)
+        ProfilingService._raise_if_aborted(self._should_abort)
+        return result
+
+    @property
+    def description(self) -> Any:
+        return self._query.description
+
+    def execute(self, sql: str) -> _ProfileQuery:
+        self._call("execute", sql)
+        return self
+
+    def sql(self, sql: str) -> Any:
+        return self._call("sql", sql)
+
+    def fetchone(self) -> Any:
+        return self._call("fetchone")
+
+    def fetchall(self) -> Any:
+        return self._call("fetchall")
+
+    def fetchmany(self, size: int) -> Any:
+        return self._call("fetchmany", size)
+
 
 ROW_COUNT_HIGH = 0.30
 ROW_COUNT_MEDIUM = 0.10
@@ -65,6 +105,26 @@ def source_profile_key(source_config: dict[str, Any]) -> str:
     return f"{connection_id}:{kind}:{name}"
 
 
+def frequency_analysis_status(stats: dict[str, Any]) -> str:
+    """Describe coverage, including older snapshots without explicit status."""
+    if stats.get("frequency_status"):
+        return str(stats["frequency_status"])
+    if stats.get("frequency_values") or stats.get("top_values"):
+        return "Available (full-source counts)"
+    return "Not recorded in this snapshot"
+
+
+def _frequency_skip_reason(stats: dict[str, Any], *, is_text: bool) -> str:
+    if not is_text:
+        return "Not applicable: non-text column"
+    distinct = int(stats.get("distinct_count") or 0)
+    if distinct <= 0:
+        return "No non-null values"
+    if distinct > FREQUENCY_DISTINCT_LIMIT:
+        return f"Skipped: more than {FREQUENCY_DISTINCT_LIMIT} distinct values"
+    return ""
+
+
 class ProfilingService:
     def __init__(self, connector_service: ConnectorService) -> None:
         self.connector_service = connector_service
@@ -78,11 +138,19 @@ class ProfilingService:
         text_inference_limit: int | None = TEXT_INFERENCE_SAMPLE_LIMIT,
         should_abort: AbortCallback | None = None,
     ) -> dict[str, Any]:
+        user_progress_callback = progress_callback
+
+        def progress(value: float, stage: str) -> None:
+            self._raise_if_aborted(should_abort)
+            self._report_progress(user_progress_callback, value, stage)
+            self._raise_if_aborted(should_abort)
+
+        progress_callback = progress
         self._raise_if_aborted(should_abort)
         self._report_progress(progress_callback, 0.02, "Opening source")
         connection = connections[int(source_config["source_connection_id"])]
         if connection.connection_type == ConnectionType.CSV:
-            profile = self._profile_duckdb(source_config, connections, progress_callback)
+            profile = self._profile_duckdb(source_config, connections, progress_callback, should_abort=should_abort)
             self._raise_if_aborted(should_abort)
             return profile
         return self._profile_oracle(
@@ -98,14 +166,18 @@ class ProfilingService:
         source_config: dict[str, Any],
         connections: dict[int, Connection],
         progress_callback: ProgressCallback | None = None,
+        *,
+        should_abort: AbortCallback | None = None,
     ) -> dict[str, Any]:
-        con = duckdb.connect()
+        db_conn = duckdb.connect()
+        con = _ProfileQuery(db_conn, should_abort)
         try:
             relation = self.connector_service.build_rule_source_relation(con, source_config, connections)
             con.sql(f"CREATE OR REPLACE VIEW profile_view AS {relation.sql_query()}")
             self._report_progress(progress_callback, 0.10, "Reading schema and row count")
-            summary = con.execute("SUMMARIZE SELECT * FROM profile_view").fetchall()
-            summary_columns = [column[0] for column in con.execute("SUMMARIZE SELECT * FROM profile_view").description]
+            summary_cursor = con.execute("SUMMARIZE SELECT * FROM profile_view")
+            summary_columns = [column[0] for column in summary_cursor.description]
+            summary = summary_cursor.fetchall()
             index = {name: position for position, name in enumerate(summary_columns)}
             row_count = con.execute("SELECT COUNT(*) FROM profile_view").fetchone()[0]
             total_column_count = len(summary)
@@ -162,7 +234,7 @@ class ProfilingService:
             self._report_progress(progress_callback, 1.0, "Profile complete")
             return profile
         finally:
-            con.close()
+            db_conn.close()
 
     def _add_duckdb_frequency_analysis(
         self,
@@ -175,10 +247,11 @@ class ProfilingService:
     ) -> None:
         total = max(1, len(columns))
         for index, (name, stats) in enumerate(columns.items(), start=1):
-            if not str(stats.get("type") or "").upper().startswith("VARCHAR"):
-                self._report_progress(progress_callback, 0.62 + 0.16 * index / total, f"Frequency analysis: {name}")
-                continue
-            if not 0 < int(stats.get("distinct_count") or 0) <= FREQUENCY_DISTINCT_LIMIT:
+            skip_reason = _frequency_skip_reason(
+                stats, is_text=str(stats.get("type") or "").upper().startswith("VARCHAR")
+            )
+            if skip_reason:
+                stats["frequency_status"] = skip_reason
                 self._report_progress(progress_callback, 0.62 + 0.16 * index / total, f"Frequency analysis: {name}")
                 continue
             quoted = '"' + name.replace('"', '""') + '"'
@@ -187,6 +260,7 @@ class ProfilingService:
                 f"GROUP BY NULLIF(trim({quoted}), '') ORDER BY count DESC, value LIMIT {FREQUENCY_DISTINCT_LIMIT}"
             ).fetchall()
             stats["frequency_values"] = _frequency_rows(rows, row_count)
+            stats["frequency_status"] = "Available (full-source counts)"
             stats["top_values"] = stats["frequency_values"][:MAX_FREQUENCY_VALUES]
             findings.extend(_placeholder_findings(name, stats["top_values"]))
             self._report_progress(progress_callback, 0.62 + 0.16 * index / total, f"Frequency analysis: {name}")
@@ -382,31 +456,32 @@ class ProfilingService:
         date_markers = ("DATE", "TIME")
         text_markers = ("CHAR", "TEXT", "CLOB", "STRING", "STR")
         stddev_function = "STDEV" if self.connector_service.database_dialect(connection) == "sqlserver" else "STDDEV"
-        try:
-            with db_conn.cursor() as cursor:
-                self._report_progress(progress_callback, 0.10, "Reading schema")
-                cursor.execute(self.connector_service.describe_sql(sql))
-                all_described = cursor.description
-                described = all_described
-                numeric_names = {
-                    item[0]
-                    for item in described
-                    if any(marker in str(item[1]).upper() for marker in numeric_markers)
-                }
-                date_names = {
-                    item[0]
-                    for item in described
-                    if any(marker in str(item[1]).upper() for marker in date_markers)
-                }
-                text_names = {
-                    item[0]
-                    for item in described
-                    if any(marker in str(item[1]).upper() for marker in text_markers)
-                    and item[0] not in numeric_names
-                    and item[0] not in date_names
-                }
-                cursor.execute(f"SELECT COUNT(*) FROM ({sql}) q")
-                row_count = int(cursor.fetchone()[0])
+        with ExitStack() as resources:
+            resources.callback(db_conn.close)
+            cursor = _ProfileQuery(resources.enter_context(db_conn.cursor()), should_abort)
+            self._report_progress(progress_callback, 0.10, "Reading schema")
+            cursor.execute(self.connector_service.describe_sql(sql))
+            all_described = cursor.description
+            described = all_described
+            numeric_names = {
+                item[0]
+                for item in described
+                if any(marker in str(item[1]).upper() for marker in numeric_markers)
+            }
+            date_names = {
+                item[0]
+                for item in described
+                if any(marker in str(item[1]).upper() for marker in date_markers)
+            }
+            text_names = {
+                item[0]
+                for item in described
+                if any(marker in str(item[1]).upper() for marker in text_markers)
+                and item[0] not in numeric_names
+                and item[0] not in date_names
+            }
+            cursor.execute(f"SELECT COUNT(*) FROM ({sql}) q")
+            row_count = int(cursor.fetchone()[0])
             self._raise_if_aborted(should_abort)
             self._report_progress(progress_callback, 0.18, "Calculating column statistics")
             columns: dict[str, dict[str, Any]] = {}
@@ -514,8 +589,6 @@ class ProfilingService:
             }
             self._report_progress(progress_callback, 1.0, "Profile complete")
             return profile
-        finally:
-            db_conn.close()
 
     def _add_database_frequency_analysis(
         self, cursor: Any, sql: str, connection: Connection, text_names: set[str], columns: dict[str, dict[str, Any]],
@@ -524,10 +597,12 @@ class ProfilingService:
     ) -> None:
         dialect = self.connector_service.database_dialect(connection)
         names = sorted(text_names)
+        for name, stats in columns.items():
+            stats["frequency_status"] = _frequency_skip_reason(stats, is_text=name in text_names)
         total = max(1, len(names))
         for index, name in enumerate(names, start=1):
             stats = columns[name]
-            if not 0 < int(stats.get("distinct_count") or 0) <= FREQUENCY_DISTINCT_LIMIT:
+            if stats["frequency_status"]:
                 self._report_progress(progress_callback, 0.72 + 0.23 * index / total, f"Frequency analysis: {name}")
                 continue
             quoted = '"' + name.replace('"', '""') + '"'
@@ -538,6 +613,7 @@ class ProfilingService:
             )
             cursor.execute(self.connector_service.limited_sql(frequency_sql, FREQUENCY_DISTINCT_LIMIT, dialect))
             stats["frequency_values"] = _frequency_rows(cursor.fetchall(), row_count)
+            stats["frequency_status"] = "Available (full-source counts)"
             stats["top_values"] = stats["frequency_values"][:MAX_FREQUENCY_VALUES]
             findings.extend(_placeholder_findings(name, stats["top_values"]))
             self._report_progress(progress_callback, 0.72 + 0.23 * index / total, f"Frequency analysis: {name}")
@@ -622,12 +698,14 @@ class ProfilingService:
                 continue
             date_share = date_count[name] / sample_size
             numeric_share = numeric_count[name] / sample_size
-            stats["inference_confidence"] = round(max(date_share, numeric_share), 6)
+            stats["inference_confidence"] = None
             if date_share >= DOMINANT_SHARE:
+                stats["inference_confidence"] = round(date_share, 6)
                 stats["inferred_type"] = "date/time"
                 stats["min"] = date_min[name].isoformat() if date_min[name] is not None else None
                 stats["max"] = date_max[name].isoformat() if date_max[name] is not None else None
             elif numeric_share >= DOMINANT_SHARE:
+                stats["inference_confidence"] = round(numeric_share, 6)
                 stats["inferred_type"] = "numeric text"
                 stats["min"] = numeric_min[name]
                 stats["max"] = numeric_max[name]

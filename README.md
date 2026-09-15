@@ -130,6 +130,8 @@ Rules are built from a fixed set of check types, each with its own setup form:
 - **Referential Integrity** — fails source rows whose key doesn't exist in a target source
 - **Keyed Comparison** — joins source and target by key and fails rows where compared fields differ
 
+For custom SQL against one CSV file, query `dataset_view`. The rule form shows an example next to the SQL field. Whole-connection CSV rules use the exact view names listed in the Source panel, including suffixes where filenames produce the same SQL name. Trailing semicolons and queries with their own `LIMIT` are supported. A `LIMIT` in your rule restricts which failures count; the application's separate 500-row evidence preview limit does not restrict the failure count.
+
 **Rule groups** nest rules and subgroups into a tree; running a group runs every rule nested under it (including subgroups) in one batch. You can create an empty group first, then add rules or subgroups later. Select either a rule or a group and choose **Move to group** to place it under a destination group; destinations that would create a nesting cycle are excluded.
 
 The **Rules tab** overview shows every rule and group as a single indented tree. Each rule row has a checkbox, independent of rule groups — check any combination of rules across the tree and click **Run selected** to execute exactly that set in one batch, with a confirmation dialog and a combined pass/fail/error summary. This is separate from the single-item **Run** button (which runs whichever rule or group is currently selected) and from running a whole group.
@@ -149,6 +151,10 @@ The **Schedules tab** runs a single rule or an entire rule group automatically, 
 - The Schedules tab shows historical executions plus pass rate, checked/failed rows, runtime, and status for runs associated with that schedule.
 
 ## Source preview and anomaly detection
+
+Frequency analysis reports full-source counts for text columns with at most 100 distinct values. Other columns now show why analysis was skipped or is not applicable, in both the profile table and Excel export. Older snapshots without coverage metadata are labelled as not recorded. Excel exports preserve source text literally, including values that start with `=`.
+
+Abort is checked before and after each profiling query/fetch for CSV and database sources, as well as at progress boundaries. A running driver operation must return before it can stop. CSV profiling calculates its summary once per run. For inferred database text types, the displayed match percentage describes the selected type's share of non-empty scanned values; it is not a statistical confidence interval.
 
 The **Preview tab** shows the first rows of any connection's file or table — a quick sanity check before building rules against it.
 

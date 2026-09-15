@@ -8,6 +8,8 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from dqtool.services.profiling import frequency_analysis_status
+
 HEADER_FILL = PatternFill("solid", fgColor="5B5248")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 
@@ -67,6 +69,7 @@ def build_anomaly_report_workbook(
             "Min",
             "Max",
             "Mean",
+            "Frequency analysis",
         ],
         [
             (
@@ -87,6 +90,7 @@ def build_anomaly_report_workbook(
                 stats.get("min") if stats.get("min") is not None else "",
                 stats.get("max") if stats.get("max") is not None else "",
                 stats.get("mean") if stats.get("mean") is not None else "",
+                frequency_analysis_status(stats),
             )
             for name, stats in profile.get("columns", {}).items()
         ],
@@ -135,8 +139,12 @@ def _append_sheet(sheet, headers: list[str], rows: list[tuple[Any, ...]]) -> Non
         cell.font = HEADER_FONT
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(1, len(safe_rows) + 1)}"
-    for row in safe_rows:
+    for row_index, row in enumerate(safe_rows, start=2):
         sheet.append(row)
+        for column_index, value in enumerate(row, start=1):
+            if isinstance(value, str):
+                # Preserve literal source text, including '=' and '#N/A' values.
+                sheet.cell(row=row_index, column=column_index).data_type = "s"
     for index, header in enumerate(safe_headers, start=1):
         values = [str(header), *(str(row[index - 1] or "") for row in safe_rows)]
         sheet.column_dimensions[get_column_letter(index)].width = min(60, max(12, max(map(len, values)) + 2))

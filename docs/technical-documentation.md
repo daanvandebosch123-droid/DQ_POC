@@ -250,6 +250,12 @@ For CSV sources it also infers a practical column meaning (for example number, d
 
 The profile UI groups/filter suggestions by source field. When a user selects one and chooses **Create selected rule**, the web layer combines the profiled source reference with the suggested settings and opens the normal rule dialog. It never saves a rule automatically. This keeps profiling advisory and prevents observed values from silently becoming business policy. For text-backed date columns, date inference is based on values DuckDB can safely cast as dates; physical database date/time types are also recognised.
 
+Profiling query execution uses a per-worker `_ProfileQuery` adapter to check cancellation before and after SQL calls and fetches, including CSV content/privacy checks and database frequency queries. The database cursor context remains open until all profiling phases have completed, and cursor/connection cleanup runs on success, error, or abort. Cancellation is cooperative: it does not forcibly terminate an in-flight driver operation. CSV `SUMMARIZE` results and their description are captured from one execution.
+
+Each new profile column has a `frequency_status` describing whether full-source frequency counts are available, the column has no non-null values, is non-text, or exceeds the 100-distinct-value limit. Historical snapshots are handled without a schema migration. Inferred text `inference_confidence` records the selected date/numeric type's match share, or null if no type was selected. The UI and exports describe the evidence without treating it as statistical certainty. Excel export explicitly stores strings as text to preserve values beginning with `=` or resembling Excel errors, while numeric metrics remain numeric.
+
+Single-file CSV custom SQL rules normalize a trailing semicolon before composing summary SQL and apply the 500-row evidence limit through an outer query, allowing the user's own `LIMIT` or CTE. A user-specified limit remains part of the rule's failure-count semantics. CSV whole-connection view discovery and execution share `csv_connection_view_paths`, including case-insensitive collision handling; the rule form displays these same aliases.
+
 ### GDPR-sensitive-data review
 
 `gdpr_risk_findings()` produces a separate, heuristic review list. It uses

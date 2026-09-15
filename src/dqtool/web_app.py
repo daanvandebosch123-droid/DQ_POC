@@ -42,6 +42,7 @@ from dqtool.services.profiling import (
     ProfileAborted,
     ProfilingService,
     detect_anomalies,
+    frequency_analysis_status,
     profile_rule_suggestions,
     source_profile_key,
 )
@@ -317,7 +318,7 @@ PROFILE_FREQUENCY_CELL_TEMPLATE = r"""
                 </q-card>
             </q-menu>
         </q-btn>
-        <span v-else>-</span>
+        <span v-else class="text-caption">{{ props.row.frequency_status }}</span>
     </q-td>
 """
 
@@ -1590,6 +1591,7 @@ class DQToolWebApp:
                 "type": stats.get("type", ""),
                 "inferred_type": stats.get("inferred_type", "text"),
                 "inference": format_inference_details(stats),
+                "frequency_status": frequency_analysis_status(stats),
                 "null_rate": f"{float(stats.get('null_rate') or 0):.1%}",
                 "blank_rate": "-" if stats.get("blank_rate") is None else f"{float(stats['blank_rate']):.1%}",
                 "distinct": stats.get("distinct_count", ""),
@@ -2922,6 +2924,7 @@ class DQToolWebApp:
                     max_date = ui.input("Latest allowed date", placeholder="YYYY-MM-DD").classes("grow min-w-[180px]")
                 allowed_values = ui.input("Allowed values *", placeholder="ACTIVE, INACTIVE").classes("w-full")
                 rule_sql = ui.textarea("Rule SQL *").props("autogrow").classes("w-full font-mono")
+                csv_sql_hint = ui.markdown("").classes("w-full text-sm")
                 with ui.row().classes("w-full gap-3 flex-wrap") as threshold_fields:
                     threshold_operator = ui.select(
                         {">": ">", ">=": ">=", "<": "<", "<=": "<=", "==": "==", "!=": "!="},
@@ -3009,6 +3012,27 @@ class DQToolWebApp:
                     RuleType.CUSTOM_SQL_THRESHOLD,
                     RuleType.CUSTOM_SQL_CONNECTION,
                 }
+                csv_connection = connections.get(str(source_connection.value))
+                csv_sql_hint.visible = (
+                    rule_sql.visible and csv_connection is not None and csv_connection.connection_type == ConnectionType.CSV
+                )
+                if selected_type == RuleType.CUSTOM_SQL_CONNECTION:
+                    csv_sql_hint.content = (
+                        "Use the CSV view names listed in **Source** above (without `.csv`). "
+                        "Join views using those names. Every returned row counts as a failure."
+                    )
+                elif selected_type == RuleType.CUSTOM_SQL_THRESHOLD:
+                    csv_sql_hint.content = (
+                        "The selected CSV is available as `dataset_view`. Return one numeric column named `value`:\n\n"
+                        "```sql\nSELECT COUNT(*) AS value FROM dataset_view\n```"
+                    )
+                else:
+                    csv_sql_hint.content = (
+                        "The selected CSV is available as `dataset_view`:\n\n"
+                        "```sql\nSELECT * FROM dataset_view\n```\n\n"
+                        "Add a WHERE condition to return only invalid rows. Every returned row counts as a failure."
+                    )
+                csv_sql_hint.update()
                 threshold_fields.visible = selected_type == RuleType.CUSTOM_SQL_THRESHOLD
                 target_key_select.visible = selected_type == RuleType.REFERENTIAL_INTEGRITY
                 target_relation.visible = selected_type == RuleType.KEYED_COMPARISON
@@ -3122,19 +3146,14 @@ class DQToolWebApp:
                     status_label.text = "Loading what the SQL can reference..."
                     status_label.update()
                     try:
-                        targets = await nicegui_run.io_bound(self.connector_service.list_connection_targets, connection)
+                        if connection.connection_type == ConnectionType.CSV:
+                            view_paths = await nicegui_run.io_bound(self.connector_service.csv_connection_view_paths, connection)
+                            names = list(view_paths)
+                        else:
+                            names = await nicegui_run.io_bound(self.connector_service.list_connection_targets, connection)
                     except Exception as exc:
                         status_label.text = f"The SQL runs against the whole connection. Could not list its items: {exc}"
                     else:
-                        if connection.connection_type == ConnectionType.CSV:
-                            names = []
-                            for target in targets:
-                                stem = target.rsplit("/", 1)[-1]
-                                stem = stem[:-4] if stem.lower().endswith(".csv") else stem
-                                cleaned = re.sub(r"\W+", "_", stem).strip("_") or "csv"
-                                names.append(f"t_{cleaned}" if cleaned[0].isdigit() else cleaned)
-                        else:
-                            names = targets
                         preview = ", ".join(names[:12]) + (" ..." if len(names) > 12 else "")
                         status_label.text = (
                             f"The SQL can reference: {preview}" if names else "No tables or files were found on this connection."
@@ -3244,6 +3263,7 @@ class DQToolWebApp:
 
             async def refresh_source_targets() -> None:
                 sync_reference_fields(source_connection, source_kind, source_name, source_sql)
+                update_setting_visibility()
                 await populate_targets(source_connection, source_kind, source_name, source_targets)
                 if source_connection.value and source_kind.value and (source_name.value or source_sql.value):
                     await refresh_source_rule_columns()

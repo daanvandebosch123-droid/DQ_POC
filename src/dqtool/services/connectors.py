@@ -292,6 +292,13 @@ class ConnectorService:
         customers.csv becomes the view `customers`; names are sanitized so they stay
         valid SQL identifiers. Returns view name -> file path for reference.
         """
+        registered = self.csv_connection_view_paths(connection)
+        for view_name, file_path in registered.items():
+            con.sql(f'CREATE OR REPLACE VIEW "{view_name}" AS SELECT * FROM {self._csv_reader(Path(file_path))}')
+        return registered
+
+    def csv_connection_view_paths(self, connection: Connection) -> dict[str, str]:
+        """Use the same view names for SQL guidance and execution, without reading CSV contents."""
         if connection.connection_type != ConnectionType.CSV:
             raise RuntimeError("Only CSV connections can be loaded into the local rule engine.")
         selected_file = self.csv_connection_file(connection)
@@ -307,7 +314,6 @@ class ConnectorService:
         registered: dict[str, str] = {}
         for file_path in files:
             view_name = self._view_name_for_file(file_path, registered)
-            con.sql(f'CREATE OR REPLACE VIEW "{view_name}" AS SELECT * FROM {self._csv_reader(file_path)}')
             registered[view_name] = str(file_path)
         return registered
 
@@ -317,7 +323,8 @@ class ConnectorService:
             base = f"t_{base}"
         candidate = base
         index = 2
-        while candidate in taken:
+        taken_names = {name.casefold() for name in taken}
+        while candidate.casefold() in taken_names:
             candidate = f"{base}_{index}"
             index += 1
         return candidate

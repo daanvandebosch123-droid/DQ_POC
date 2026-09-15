@@ -86,3 +86,24 @@ class AnomalyExportTests(unittest.TestCase):
         workbook = load_workbook(BytesIO(report), data_only=True)
 
         self.assertEqual("ande de buf 150g", workbook["Value frequencies"]["B2"].value)
+
+    def test_export_preserves_formula_like_text_and_numeric_values(self) -> None:
+        value = "=1+1"
+        profile = {"columns": {value: {
+            "type": "VARCHAR", "min": value, "max": "#N/A", "mean": 2.5,
+            "frequency_status": "Available (full-source counts)",
+            "frequency_values": [{"value": value, "count": 3, "share": 1.0}],
+        }}}
+        report = build_anomaly_report_workbook(value, profile, [{"column": value, "message": value}])
+        for data_only in (False, True):
+            workbook = load_workbook(BytesIO(report), data_only=data_only)
+            for sheet, address in (("Summary", "B2"), ("Column profile", "A2"), ("Column profile", "K2"),
+                                   ("Value frequencies", "B2"), ("Drift findings", "C2")):
+                cell = workbook[sheet][address]
+                self.assertEqual(value, cell.value)
+                self.assertEqual("s", cell.data_type)
+            self.assertEqual("#N/A", workbook["Column profile"]["L2"].value)
+            self.assertEqual("s", workbook["Column profile"]["L2"].data_type)
+            self.assertEqual(2.5, workbook["Column profile"]["M2"].value)
+            self.assertEqual(3, workbook["Value frequencies"]["C2"].value)
+            self.assertEqual("Available (full-source counts)", workbook["Column profile"]["N2"].value)

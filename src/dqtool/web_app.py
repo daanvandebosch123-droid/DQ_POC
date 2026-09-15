@@ -257,6 +257,10 @@ TREE_DETAILS_CELL_TEMPLATE = r"""
             color="grey-7"
             :label="props.row.details"
         />
+        <div v-else-if="props.row.detail_type" class="column no-wrap" style="gap: 2px">
+            <q-badge outline color="grey-6" :label="props.row.detail_type" style="width: fit-content" />
+            <span v-if="props.row.details" class="text-caption" style="color: #837d74">{{ props.row.details }}</span>
+        </div>
         <span v-else>{{ props.row.details }}</span>
     </q-td>
 """
@@ -443,7 +447,7 @@ class DQToolWebApp:
         self.anomaly_batch_table: ui.table
 
         self.connection_select: ui.select
-        self.item_select: ui.select
+        self.selection_action_buttons: list[ui.button] = []
         self.run_checked_button: ui.button
         self.schedule_select: ui.select
         self.schedule_execution_summary: ui.label
@@ -938,10 +942,7 @@ class DQToolWebApp:
                         )
                     ui.label("See every rule and rule group in one place.").classes("dq-panel-copy text-sm")
                 with ui.row().classes("items-end gap-2 flex-wrap grow justify-end"):
-                    self.item_select = ui.select(options={}, label="Selected item").props("outlined dense").classes(
-                        "grow min-w-[230px] max-w-[380px]"
-                    )
-                    self.item_select.on_value_change(self._on_item_select_change)
+                    # Create actions: always available, no selection needed.
                     ui.button("Add rule", icon="add", on_click=lambda: self.show_rule_dialog()).props(
                         "color=primary unelevated no-caps"
                     )
@@ -951,19 +952,26 @@ class DQToolWebApp:
                     ui.button("Add group", icon="create_new_folder", on_click=lambda: self.show_group_dialog()).props(
                         "outline no-caps"
                     )
-                    ui.button("Move to group", icon="drive_file_move", on_click=self.move_selected_item_to_group).props(
-                        "outline no-caps"
-                    )
-                    ui.button("Edit", icon="edit", on_click=self.edit_selected_item).props("outline no-caps")
-                    # Run is a frequent, safe action - it gets the "positive" brand color rather than
-                    # the alarm-red "secondary" so it doesn't visually outrank Delete, the one button
-                    # here that actually warrants caution.
-                    ui.button("Run", icon="play_arrow", on_click=self.run_selected_item).props(
-                        "color=positive unelevated no-caps"
-                    )
-                    ui.button("Delete", icon="delete", on_click=self.delete_selected_item).props(
-                        "outline no-caps color=negative"
-                    )
+                    ui.separator().props("vertical").classes("self-stretch mx-1")
+                    # Act-on-selection actions: disabled until a row is picked (see
+                    # _update_selection_action_buttons), since none of them mean anything otherwise.
+                    self.selection_action_buttons = [
+                        ui.button(
+                            "Move to group", icon="drive_file_move", on_click=self.move_selected_item_to_group
+                        ).props("outline no-caps"),
+                        ui.button("Edit", icon="edit", on_click=self.edit_selected_item).props("outline no-caps"),
+                        # Run is a frequent, safe action - it gets the "positive" brand color rather than
+                        # the alarm-red "secondary" so it doesn't visually outrank Delete, the one button
+                        # here that actually warrants caution.
+                        ui.button("Run", icon="play_arrow", on_click=self.run_selected_item).props(
+                            "color=positive unelevated no-caps"
+                        ),
+                        ui.button("Delete", icon="delete", on_click=self.delete_selected_item).props(
+                            "outline no-caps color=negative"
+                        ),
+                    ]
+                    for button in self.selection_action_buttons:
+                        button.disable()
             with ui.row().classes("w-full items-center justify-end gap-2 mt-2"):
                 ui.label("Check rules below to run just those.").classes("dq-panel-copy text-xs text-[#837d74] grow")
                 self.run_checked_button = ui.button(
@@ -975,8 +983,16 @@ class DQToolWebApp:
                     "outlined dense clearable prepend-icon=search"
                 ).classes("w-full max-w-md")
                 self.overview_search.on_value_change(lambda _event: self._refresh_overview_view())
+            overview_columns = self._tree_table_columns(
+                ["Batch", "Name", "Kind", "Details", "Owner", "Visibility", "Used In"]
+            )
+            for column in overview_columns:
+                if column["name"] == "batch":
+                    # Field/slot name stays "batch" (it's what queues a rule for "Run selected"),
+                    # but "Queue" is the clearer header label for what the checkbox actually does.
+                    column["label"] = "Queue"
             self.overview_table = ui.table(
-                columns=self._tree_table_columns(["Batch", "Name", "Kind", "Details", "Owner", "Visibility", "Used In"]),
+                columns=overview_columns,
                 rows=[],
                 row_key="key",
                 pagination=10,
@@ -5031,7 +5047,10 @@ class DQToolWebApp:
                     "kind": "rule",
                     "depth": depth,
                     "name": rule.name,
-                    "details": rule.rule_type.value + (f" — {rule.description}" if rule.description else ""),
+                    # Split into a type chip ("detail_type") plus a free-text caption ("details")
+                    # instead of one run-on string - see TREE_DETAILS_CELL_TEMPLATE.
+                    "detail_type": rule.rule_type.value,
+                    "details": rule.description or "",
                     "owner": rule.owner_username,
                     "visibility": rule.visibility,
                     "used_in": ", ".join(used_in) if used_in else "-",
@@ -5071,18 +5090,22 @@ class DQToolWebApp:
         for row in rows:
             row["has_children"] = child_counts.get(row["stable_key"], 0) > 0
 
-        options: dict[str, str] = {}
+        # Keys in row/traversal order - used only to validate/fall back the current selection
+        # (there's no dropdown to label anymore; the selected row's own highlight is the
+        # indicator now, see _highlight_overview_row).
+        valid_keys: list[str] = []
+        seen_keys: set[str] = set()
         for row in rows:
-            if row["stable_key"] not in options:
-                prefix = "\U0001f4c1 " if row["kind"] == "group" else ""
-                options[row["stable_key"]] = f"{prefix}{row['name']} ({row['details']})"
+            if row["stable_key"] not in seen_keys:
+                seen_keys.add(row["stable_key"])
+                valid_keys.append(row["stable_key"])
 
         # Drop checkmarks for rules that were deleted or became inaccessible since last checked.
         existing_rule_keys = {row["stable_key"] for row in rows if row["kind"] == "rule"}
         self._checked_rule_keys &= existing_rule_keys
 
         self._overview_all_rows = rows
-        self._set_item_select_options(options)
+        self._sync_selected_item_key(valid_keys)
         self._refresh_overview_view()
 
     def _group_parent_names(self, groups: list[RuleGroup]) -> dict[int, list[str]]:
@@ -5439,7 +5462,7 @@ class DQToolWebApp:
     def _selected_rule(self) -> Rule | None:
         if not self.project:
             return None
-        value = self.item_select.value
+        value = self.selected_item_key
         if not value or not str(value).startswith("rule:"):
             return None
         rule_id = int(str(value).split(":", 1)[1])
@@ -5448,7 +5471,7 @@ class DQToolWebApp:
     def _selected_group(self) -> RuleGroup | None:
         if not self.project:
             return None
-        value = self.item_select.value
+        value = self.selected_item_key
         if not value or not str(value).startswith("group:"):
             return None
         group_id = int(str(value).split(":", 1)[1])
@@ -5670,17 +5693,11 @@ class DQToolWebApp:
             self.selected_connection_id = value
         select.update()
 
-    def _set_item_select_options(self, options: dict[str, str]) -> None:
+    def _sync_selected_item_key(self, valid_keys: list[str]) -> None:
+        """Keep the Rules tab's selection valid as its rows are rebuilt: fall back to the
+        first available item (or none) if the previously selected one disappeared."""
         current = self.selected_item_key
-        value = current if current in options else (next(iter(options)) if options else None)
-        self.item_select.options = options
-        self.item_select.value = value
-        self.selected_item_key = value
-        self.item_select.update()
-
-    def _on_item_select_change(self, event: Any) -> None:
-        self.selected_item_key = event.value
-        self._highlight_overview_row()
+        self.selected_item_key = current if current in valid_keys else (valid_keys[0] if valid_keys else None)
 
     def _refresh_overview_view(self) -> None:
         for row in self._overview_all_rows:
@@ -5794,18 +5811,22 @@ class DQToolWebApp:
         self._refresh_overview_view()
 
     def _highlight_overview_row(self) -> None:
-        selected = self.item_select.value
+        selected = self.selected_item_key
         self.overview_table.selected = [row for row in self.overview_table.rows if row["stable_key"] == selected]
         self.overview_table.update()
+        self._update_selection_action_buttons()
+
+    def _update_selection_action_buttons(self) -> None:
+        """Move to group/Edit/Run/Delete only make sense once a rule or group is selected."""
+        has_selection = self.selected_item_key is not None
+        for button in self.selection_action_buttons:
+            button.enable() if has_selection else button.disable()
 
     def _select_overview_row(self, event: Any) -> None:
         row = self._row_from_click_event(event)
         if row is None:
             return
-        key = row["stable_key"]
-        self.selected_item_key = key
-        self.item_select.value = key
-        self.item_select.update()
+        self.selected_item_key = row["stable_key"]
         self._highlight_overview_row()
 
     def _row_from_click_event(self, event: Any) -> dict[str, Any] | None:

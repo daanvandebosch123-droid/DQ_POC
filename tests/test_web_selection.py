@@ -24,7 +24,6 @@ class WebSelectionTests(unittest.TestCase):
         self.rule_row = {"stable_key": "rule:7", "id": 7, "kind": "rule", "name": "Required email"}
         self.app.overview_table = FakeElement(rows=[self.rule_row])
         self.app.results_table = FakeElement(rows=[{"id": 12, "status": "FAILED"}])
-        self.app.item_select = FakeElement()
         self.app.result_select = FakeElement()
 
     def test_clicking_overview_rule_row_selects_rule(self) -> None:
@@ -33,8 +32,17 @@ class WebSelectionTests(unittest.TestCase):
         self.app._select_overview_row(event)
 
         self.assertEqual("rule:7", self.app.selected_item_key)
-        self.assertEqual("rule:7", self.app.item_select.value)
         self.assertEqual([self.rule_row], self.app.overview_table.selected)
+
+    def test_selection_action_buttons_enable_once_something_is_selected(self) -> None:
+        button = Mock()
+        self.app.selection_action_buttons = [button]
+        event = SimpleNamespace(args=[{}, self.rule_row, 0])
+
+        self.app._select_overview_row(event)
+
+        button.enable.assert_called_once_with()
+        button.disable.assert_not_called()
 
     def test_clicking_result_row_selects_result_and_opens_details(self) -> None:
         self.app.view_selected_result = Mock()

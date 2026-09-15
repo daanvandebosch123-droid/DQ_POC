@@ -995,8 +995,11 @@ class DQToolWebApp:
                 columns=overview_columns,
                 rows=[],
                 row_key="key",
-                pagination=10,
-            ).props("flat bordered wrap-cells").classes("dq-table-wrap dq-tree-table w-full mt-4")
+                # No pagination: this is a tree (groups + nested rules), and paginating by
+                # flattened row can split a group's header from its own child rows onto
+                # different pages. It scrolls instead, like any other tree/folder view.
+                pagination=0,
+            ).props("flat bordered wrap-cells hide-pagination").classes("dq-table-wrap dq-tree-table w-full mt-4")
             self.overview_table.classes(add="dq-selectable-table")
             self.overview_table.on("rowClick", self._select_overview_row)
             self.overview_table.on("toggle_group", self._on_toggle_group)
@@ -1127,8 +1130,10 @@ class DQToolWebApp:
                     columns=self._tree_table_columns(["Name", "Kind", "Details", "Runs", "Last Status", "Last Run", "Last Failed"]),
                     rows=[],
                     row_key="key",
-                    pagination=10,
-                ).props("flat bordered wrap-cells").classes("dq-table-wrap dq-tree-table w-full mt-4")
+                    # Same reasoning as the Rules tab's overview_table: paginating a tree by
+                    # flattened row can split a group from its own nested rows across pages.
+                    pagination=0,
+                ).props("flat bordered wrap-cells hide-pagination").classes("dq-table-wrap dq-tree-table w-full mt-4")
                 self.rule_summary_table.classes(add="dq-selectable-table")
                 self.rule_summary_table.on("rowClick", self._select_result_rule_row)
                 self.rule_summary_table.on("toggle_group", self._on_toggle_results_group)
@@ -5120,7 +5125,6 @@ class DQToolWebApp:
         if not self.project:
             self._results_all_rows = []
             self.rule_summary_table.rows = []
-            self._sync_pagination_visibility(self.rule_summary_table, page_size=10)
             self.rule_summary_table.update()
             self.results_table.rows = []
             self._sync_pagination_visibility(self.results_table, page_size=10)
@@ -5705,7 +5709,6 @@ class DQToolWebApp:
             if row["kind"] == "rule":
                 row["checked"] = row["stable_key"] in self._checked_rule_keys
         self.overview_table.rows = self._visible_overview_rows()
-        self._sync_pagination_visibility(self.overview_table, page_size=10)
         self.overview_table.update()
         self._highlight_overview_row()
         self._update_run_checked_button()
@@ -5878,7 +5881,6 @@ class DQToolWebApp:
         for row in self._results_all_rows:
             row["collapsed"] = row["stable_key"] in self._results_collapsed
         self.rule_summary_table.rows = self._visible_results_rows()
-        self._sync_pagination_visibility(self.rule_summary_table, page_size=10)
         self.rule_summary_table.update()
         self._highlight_results_row()
 

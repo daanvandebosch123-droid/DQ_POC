@@ -64,6 +64,40 @@ class RuleType(StrEnum):
     KEYED_COMPARISON = "keyed_comparison"
 
 
+class DQDimension(StrEnum):
+    """Primary data-quality dimension a rule is intended to measure."""
+
+    ACCURACY = "accuracy"
+    CONSISTENCY = "consistency"
+    COMPLETENESS = "completeness"
+    TIMELINESS = "timeliness"
+    UNIQUENESS = "uniqueness"
+    VALIDITY = "validity"
+
+
+def default_dq_dimension(rule_type: RuleType) -> DQDimension:
+    """Return the editable primary dimension suggested for a rule template."""
+
+    dimensions = {
+        RuleType.NOT_NULL: DQDimension.COMPLETENESS,
+        RuleType.UNIQUE: DQDimension.UNIQUENESS,
+        RuleType.DUPLICATE: DQDimension.UNIQUENESS,
+        RuleType.ROW_COUNT: DQDimension.COMPLETENESS,
+        RuleType.VALUE_RANGE: DQDimension.VALIDITY,
+        RuleType.REGEX: DQDimension.VALIDITY,
+        RuleType.LENGTH: DQDimension.VALIDITY,
+        RuleType.ALLOWED_VALUES: DQDimension.VALIDITY,
+        RuleType.DATE_VALIDITY: DQDimension.VALIDITY,
+        RuleType.DATA_FRESHNESS: DQDimension.TIMELINESS,
+        RuleType.CUSTOM_SQL_FAIL_ROWS: DQDimension.VALIDITY,
+        RuleType.CUSTOM_SQL_THRESHOLD: DQDimension.VALIDITY,
+        RuleType.CUSTOM_SQL_CONNECTION: DQDimension.VALIDITY,
+        RuleType.REFERENTIAL_INTEGRITY: DQDimension.CONSISTENCY,
+        RuleType.KEYED_COMPARISON: DQDimension.ACCURACY,
+    }
+    return dimensions[rule_type]
+
+
 @dataclass(slots=True)
 class User:
     id: int | None
@@ -115,6 +149,7 @@ class Rule:
     rule_type: RuleType
     dataset_id: int | None
     owner_username: str
+    dq_dimension: DQDimension = DQDimension.VALIDITY
     description: str = ""
     visibility: str = "private"
     allowed_users: list[str] = field(default_factory=list)

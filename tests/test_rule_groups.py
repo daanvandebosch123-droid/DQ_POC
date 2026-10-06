@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dqtool.models.entities import Connection, ConnectionType, Rule, RuleGroup, RuleType
+from dqtool.models.entities import Connection, ConnectionType, DQDimension, Rule, RuleGroup, RuleType
 from dqtool.services.connectors import ConnectorService
 from dqtool.services.execution import ExecutionService
 from dqtool.services.rules import resolve_group_rules, would_create_cycle
@@ -61,6 +61,22 @@ class RuleGroupStorageTests(unittest.TestCase):
 
         rule = next(item for item in self.storage.list_rules() if item.id == rule_id)
         self.assertEqual("Customer ID is mandatory for downstream matching.", rule.description)
+
+    def test_rule_dimension_round_trips_through_storage(self) -> None:
+        rule_id = self.storage.save_rule(
+            Rule(
+                id=None,
+                name="fresh customer feed",
+                rule_type=RuleType.DATA_FRESHNESS,
+                dataset_id=None,
+                owner_username="tester",
+                dq_dimension=DQDimension.TIMELINESS,
+            )
+        )
+
+        rule = next(item for item in self.storage.list_rules() if item.id == rule_id)
+
+        self.assertEqual(DQDimension.TIMELINESS, rule.dq_dimension)
 
     def test_deleting_a_rule_removes_it_from_groups(self) -> None:
         self.storage.save_rule_group(

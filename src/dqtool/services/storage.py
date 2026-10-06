@@ -10,6 +10,7 @@ from typing import Any
 from dqtool.models.entities import (
     Connection,
     ConnectionType,
+    DQDimension,
     Role,
     Rule,
     RuleGroup,
@@ -86,6 +87,7 @@ class Storage:
                     rule_type TEXT NOT NULL,
                     dataset_id INTEGER,
                     owner_username TEXT NOT NULL,
+                    dq_dimension TEXT NOT NULL DEFAULT 'validity',
                     description TEXT NOT NULL DEFAULT '',
                     visibility TEXT NOT NULL,
                     allowed_users_json TEXT NOT NULL,
@@ -156,6 +158,22 @@ class Storage:
             rule_columns = {row["name"] for row in conn.execute("PRAGMA table_info(rules)").fetchall()}
             if "description" not in rule_columns:
                 conn.execute("ALTER TABLE rules ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+            if "dq_dimension" not in rule_columns:
+                conn.execute("ALTER TABLE rules ADD COLUMN dq_dimension TEXT NOT NULL DEFAULT 'validity'")
+                conn.execute(
+                    """
+                    UPDATE rules SET dq_dimension = CASE rule_type
+                        WHEN 'not_null' THEN 'completeness'
+                        WHEN 'unique' THEN 'uniqueness'
+                        WHEN 'duplicate' THEN 'uniqueness'
+                        WHEN 'row_count' THEN 'completeness'
+                        WHEN 'data_freshness' THEN 'timeliness'
+                        WHEN 'referential_integrity' THEN 'consistency'
+                        WHEN 'keyed_comparison' THEN 'accuracy'
+                        ELSE 'validity'
+                    END
+                    """
+                )
             run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(rule_runs)").fetchall()}
             if "schedule_id" not in run_columns:
                 conn.execute("ALTER TABLE rule_runs ADD COLUMN schedule_id INTEGER")
@@ -237,6 +255,7 @@ class Storage:
             rule.rule_type.value,
             rule.dataset_id,
             rule.owner_username,
+            rule.dq_dimension.value,
             rule.description,
             rule.visibility,
             json.dumps(rule.allowed_users),
@@ -249,9 +268,9 @@ class Storage:
                 cursor = conn.execute(
                     """
                     INSERT INTO rules(
-                        name, rule_type, dataset_id, owner_username, description, visibility, allowed_users_json,
+                        name, rule_type, dataset_id, owner_username, dq_dimension, description, visibility, allowed_users_json,
                         config_json, tags_json, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     payload,
                 )
@@ -259,7 +278,7 @@ class Storage:
             conn.execute(
                 """
                 UPDATE rules
-                SET name=?, rule_type=?, dataset_id=?, owner_username=?, description=?, visibility=?, allowed_users_json=?,
+                SET name=?, rule_type=?, dataset_id=?, owner_username=?, dq_dimension=?, description=?, visibility=?, allowed_users_json=?,
                     config_json=?, tags_json=?, updated_at=?
                 WHERE id=?
                 """,
@@ -629,6 +648,7 @@ class Storage:
             rule_type=RuleType(row["rule_type"]),
             dataset_id=row["dataset_id"],
             owner_username=row["owner_username"],
+            dq_dimension=DQDimension(row["dq_dimension"]),
             description=row["description"],
             visibility=row["visibility"],
             allowed_users=json.loads(row["allowed_users_json"]),

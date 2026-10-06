@@ -179,6 +179,27 @@ the application. Checks spanning connections, or using CSV files, retain the
 application-side comparison path because their sources cannot share a database
 query.
 
+`Keyed Comparison` has independent source and target connection/table/file/SQL
+selectors, separate matching keys, and source-to-target comparison field pairs.
+New rules store `target_connection_id`, `target_kind`, `target_name` and
+`target_sql` alongside `target_key_column` and `comparison_pairs`. Older rules
+using `target_relation` and `compare_columns` still execute and open for editing
+with their original same-connection, same-name defaults; no database migration
+is needed for these optional JSON settings.
+
+When both sides use one database connection, comparisons run as a SQL join in
+that database. For CSV or separate connections, the service reads both sources
+in batches, indexes the target key and mapped values in application memory,
+and streams the source rows. Cross-connection keys and comparison values use
+their text representation, without trimming or case folding. Null comparison
+values equal empty text, matching the existing SQL comparison convention;
+null keys and absent target keys are skipped. Use Referential Integrity for
+missing keys and Uniqueness for duplicate keys. Duplicate target keys retain
+join semantics: each mismatching source/target combination counts as a failure.
+The failed-row preview remains capped at 500 rows. Large target sources require
+memory proportional to their keys and mapped values; filter the target SQL when
+only a subset is relevant.
+
 `Data Freshness` is an aggregate check: it reads the row count and maximum value of the configured date/timestamp field, then compares that value with the current UTC time and `max_age_days`. It produces one failed evidence row when the source is empty, has no readable latest value, or is too old. Use a native date/timestamp field where possible; non-standard text dates may require a custom SQL rule.
 
 The rule dialog includes **Preview generated SQL**. It builds the failed-row and
@@ -187,6 +208,9 @@ connection or executing anything. The preview follows the selected source's
 dialect. A referential-integrity preview is available when both sources use the
 same database connection; cross-connection and CSV referential checks use the
 application-side comparison path and therefore have no single SQL preview.
+For Keyed Comparison, same-database previews show the generated join and counts;
+cross-connection/CSV previews show the separate read queries used before local
+matching.
 
 Each newly created run stores `runtime_ms`, which is displayed on the Results tab. Older runs can have no runtime because that field was added after initial releases. Failed-row files, where produced, are saved in the project's `results` directory.
 

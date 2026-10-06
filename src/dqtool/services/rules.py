@@ -78,7 +78,7 @@ RULE_TEMPLATES: dict[RuleType, dict[str, str]] = {
     RuleType.KEYED_COMPARISON: {
         "name": "Keyed Comparison",
         "description": "Joins source and target records by a key and fails rows where any selected comparison field differs.",
-        "setup": "Choose the key and comparison fields, then enter a target relation available in the same query engine. This is an advanced rule; use matching field names on both sides.",
+        "setup": "Choose source and target connections and tables, files or SQL queries, select their matching keys, then add field pairs. Names may differ. Only matching keys are compared; add Referential Integrity to check missing target keys.",
     },
 }
 
@@ -143,13 +143,39 @@ def normalize_rule_config(rule_type: RuleType, config: dict) -> dict:
         column = normalized.get("column")
         if column:
             normalized["columns"] = [column]
+    if rule_type == RuleType.KEYED_COMPARISON:
+        normalized.setdefault("target_key_column", normalized.get("key_column"))
+        if "comparison_pairs" not in normalized:
+            columns = normalized.get("compare_columns", [])
+            if isinstance(columns, list):
+                normalized["comparison_pairs"] = [{"source": column, "target": column} for column in columns]
+        elif isinstance(normalized["comparison_pairs"], list):
+            normalized["compare_columns"] = [
+                pair.get("source") for pair in normalized["comparison_pairs"] if isinstance(pair, dict)
+            ]
     return normalized
 
 
 def validate_rule_config(rule_type: RuleType, config: dict, *, require_source: bool = False) -> list[str]:
     normalized = normalize_rule_config(rule_type, config)
     missing = [key for key in RULE_REQUIRED_CONFIG[rule_type] if normalized.get(key) in (None, "", [])]
+    if rule_type == RuleType.KEYED_COMPARISON and "target_connection_id" in normalized:
+        missing = [key for key in missing if key != "target_relation"]
     errors = [f"Missing required setting: {key}" for key in missing]
+    if rule_type == RuleType.KEYED_COMPARISON:
+        if "target_connection_id" in normalized:
+            errors.extend(_validate_source_reference(normalized, "target"))
+        if not isinstance(normalized.get("target_key_column"), str) or not normalized["target_key_column"].strip():
+            errors.append("Target matching key is required.")
+        pairs = normalized.get("comparison_pairs")
+        if not isinstance(pairs, list) or not pairs:
+            errors.append("Add at least one source-to-target comparison field pair.")
+        elif any(
+            not isinstance(pair, dict)
+            or any(not isinstance(pair.get(side), str) or not pair[side].strip() for side in ("source", "target"))
+            for pair in pairs
+        ):
+            errors.append("Every comparison pair must select a source field and a target field.")
     if require_source:
         errors.extend(_validate_source_reference(normalized, "source"))
     if rule_type == RuleType.REFERENTIAL_INTEGRITY:

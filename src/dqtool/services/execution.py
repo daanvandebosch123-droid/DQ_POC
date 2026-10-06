@@ -5,7 +5,7 @@ import math
 import re
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -213,6 +213,23 @@ class ExecutionService:
             return [("Rule SQL", str(rule.config["sql"]).strip().rstrip(";"))]
 
         source_sql = self.connector_service.rule_source_sql(rule.config)
+        if rule.rule_type == RuleType.KEYED_COMPARISON and "target_connection_id" in rule.config:
+            target_connection_id = int(rule.config["target_connection_id"])
+            target_connection = connections.get(target_connection_id)
+            if target_connection is None:
+                raise ValueError("Select an accessible target connection before previewing SQL.")
+            self._validate_connection_kind(target_connection, rule.config.get("target_kind"), "target")
+            target_sql = self.connector_service.rule_source_sql(self._extract_target_source_config(rule.config))
+            if self._shared_database_connection(source_connection_id, target_connection_id, connections) is None:
+                return [
+                    ("Source read query (comparison runs locally)", self.connector_service.rule_source_read_sql(rule.config, connections)),
+                    ("Target read query", self.connector_service.rule_source_read_sql(self._extract_target_source_config(rule.config), connections)),
+                ]
+            sql_rule = replace(rule, config={**rule.config, "target_relation": f"({target_sql})"})
+            failed_sql, summary_sql = self._build_rule_sql(
+                sql_rule, f"({source_sql}) q", dialect=self.connector_service.database_dialect(source_connection),
+            )
+            return [("Failed rows query", failed_sql), ("Summary query", summary_sql)]
         if rule.rule_type == RuleType.DATA_FRESHNESS:
             column = self._quote_identifier(rule.config["column"])
             relation_name = "dataset_view" if source_connection.connection_type.value == "csv" else f"({source_sql}) q"
@@ -251,7 +268,9 @@ class ExecutionService:
             if source_connection_id not in connections:
                 raise ValueError("The selected source connection no longer exists or is not accessible.")
             self._validate_connection_kind(connections[source_connection_id], rule.config.get("source_kind"), "source")
-            if rule.rule_type == RuleType.REFERENTIAL_INTEGRITY:
+            if rule.rule_type == RuleType.REFERENTIAL_INTEGRITY or (
+                rule.rule_type == RuleType.KEYED_COMPARISON and "target_connection_id" in rule.config
+            ):
                 target_connection_id = int(rule.config["target_connection_id"])
                 if target_connection_id not in connections:
                     raise ValueError("The selected target connection no longer exists or is not accessible.")
@@ -285,6 +304,8 @@ class ExecutionService:
         connections: dict[int, Connection],
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         connection = connections[int(source_config["source_connection_id"])]
+        if rule.rule_type == RuleType.KEYED_COMPARISON and "target_connection_id" in rule.config:
+            return self._execute_keyed_comparison_sources(rule, source_config, connections)
         if rule.rule_type == RuleType.CUSTOM_SQL_CONNECTION:
             return self._run_connection_sql_rule(rule, connection)
         if rule.rule_type == RuleType.DATA_FRESHNESS:
@@ -608,6 +629,65 @@ class ExecutionService:
                     failed_rows.append(dict(zip(columns, row, strict=False)))
         return self._summary(rule, checked_count, failed_count), failed_rows
 
+    # --- keyed comparison --------------------------------------------------
+
+    def _execute_keyed_comparison_sources(
+        self, rule: Rule, source_config: dict[str, Any], connections: dict[int, Connection],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        config = normalize_rule_config(rule.rule_type, rule.config)
+        target_config = self._extract_target_source_config(config)
+        connection = self._shared_database_connection(
+            source_config.get("source_connection_id"), target_config.get("source_connection_id"), connections,
+        )
+        if connection is not None:
+            target_sql = self.connector_service.rule_source_sql(target_config)
+            sql_rule = replace(rule, config={**config, "target_relation": f"({target_sql})"})
+            return self._run_database_rule(sql_rule, connection, self.connector_service.rule_source_sql(source_config))
+        return self._scan_keyed_comparison(
+            rule, self._iter_rule_source_rows(source_config, connections),
+            self._iter_rule_source_rows(target_config, connections),
+        )
+
+    def _scan_keyed_comparison(
+        self, rule: Rule, source_batches: RowBatches, target_batches: RowBatches,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Index target mapped values, then stream source rows; preserve inner-join semantics."""
+        config = normalize_rule_config(rule.rule_type, rule.config)
+        pairs = config["comparison_pairs"]
+        target_values: dict[str, list[tuple[str, ...]]] = {}
+
+        def text(value: Any) -> str:
+            return "" if value is None else str(value)
+
+        try:
+            for columns, rows in target_batches:
+                key_index = self._column_index(columns, config["target_key_column"])
+                value_indexes = [self._column_index(columns, pair["target"]) for pair in pairs]
+                for row in rows:
+                    if row[key_index] is not None:
+                        target_values.setdefault(str(row[key_index]), []).append(tuple(text(row[index]) for index in value_indexes))
+            checked_count = failed_count = 0
+            failed_rows: list[dict[str, Any]] = []
+            for columns, rows in source_batches:
+                key_index = self._column_index(columns, config["key_column"])
+                value_indexes = [self._column_index(columns, pair["source"]) for pair in pairs]
+                for row in rows:
+                    checked_count += 1
+                    if row[key_index] is None:
+                        continue
+                    source_values = tuple(text(row[index]) for index in value_indexes)
+                    for values in target_values.get(str(row[key_index]), []):
+                        if source_values != values:
+                            failed_count += 1
+                            if len(failed_rows) < FAILED_ROW_LIMIT:
+                                failed_rows.append(dict(zip(columns, row, strict=False)))
+            return self._summary(rule, checked_count, failed_count), failed_rows
+        finally:
+            for batches in (source_batches, target_batches):
+                close = getattr(batches, "close", None)
+                if close is not None:
+                    close()
+
     # --- row iteration ------------------------------------------------------
 
     def _iter_dataset_rows(self, dataset: Dataset, connections: dict[int, Connection]) -> RowBatches:
@@ -832,14 +912,16 @@ class ExecutionService:
             raise RuntimeError("Referential integrity rules require source and target selections.")
         elif rule.rule_type == RuleType.KEYED_COMPARISON:
             key_column = self._quote_identifier(config["key_column"])
-            compare_columns = [self._quote_identifier(column) for column in config["compare_columns"]]
+            target_key_column = self._quote_identifier(config["target_key_column"])
             target_relation = config["target_relation"]
             predicates = " OR ".join(
-                f"COALESCE({self._text_expr(f's.{col}', dialect)}, '') <> COALESCE({self._text_expr(f't.{col}', dialect)}, '')"
-                for col in compare_columns
+                f"COALESCE({self._text_expr('s.' + self._quote_identifier(pair['source']), dialect)}, '') <> "
+                f"COALESCE({self._text_expr('t.' + self._quote_identifier(pair['target']), dialect)}, '')"
+                for pair in config["comparison_pairs"]
             )
             failed_sql = (
-                f"SELECT s.* FROM {relation_name} s JOIN {target_relation} t ON s.{key_column} = t.{key_column} WHERE {predicates}"
+                f"SELECT s.* FROM (SELECT * FROM {relation_name}) s JOIN {target_relation} t "
+                f"ON s.{key_column} = t.{target_key_column} WHERE {predicates}"
             )
         else:
             raise RuntimeError(f"Unsupported rule type: {rule.rule_type}")

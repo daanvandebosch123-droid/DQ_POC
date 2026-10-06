@@ -7,8 +7,9 @@ from typing import Any
 
 import duckdb
 
-from dqtool.models.entities import Connection, ConnectionType, Dataset, DatasetType
+from dqtool.models.entities import Connection, ConnectionType, Dataset, DatasetType, RuleType
 from dqtool.services.project import get_connection_secret
+from dqtool.services.rules import normalize_rule_config
 
 try:
     import oracledb
@@ -284,7 +285,32 @@ class ConnectorService:
         if connection.connection_type != ConnectionType.CSV:
             raise RuntimeError("Only CSV connections can be loaded into the local rule engine.")
         csv_path = self._rule_csv_path(connection, source_config)
+        if source_config.get("comparison_target_name"):
+            target_path = self._rule_csv_path(connection, {"source_name": source_config["comparison_target_name"]})
+            con.sql(f"CREATE OR REPLACE VIEW dq_comparison_target AS SELECT * FROM {self._csv_reader(target_path)}")
         return con.sql(f"SELECT * FROM {self._csv_reader(csv_path)}")
+
+    def validate_keyed_comparison_fields(self, config: dict[str, Any], connection_lookup: dict[int, Connection]) -> None:
+        """Check each mapped field against its own source before saving."""
+        config = normalize_rule_config(RuleType.KEYED_COMPARISON, config)
+        connection = self._rule_connection(config, connection_lookup)
+        target_config = {
+            "source_connection_id": config.get("target_connection_id", config["source_connection_id"]),
+            "source_kind": config.get("target_kind") or ("csv_file" if connection.connection_type == ConnectionType.CSV else "oracle_table"),
+            "source_name": config.get("target_name") or config.get("comparison_target_name") or config.get("target_relation"),
+            "source_sql": config.get("target_sql", ""),
+        }
+        errors = []
+        for label, source in (("Source", config), ("Target", target_config)):
+            side = label.lower()
+            key = config["key_column"] if side == "source" else config["target_key_column"]
+            required = [key, *[pair[side] for pair in config["comparison_pairs"]]]
+            available = self.list_rule_source_columns(source, connection_lookup)
+            missing = [column for column in required if column not in available]
+            if missing:
+                errors.append(f"{label} is missing selected field(s): {', '.join(missing)}.")
+        if errors:
+            raise ValueError(" ".join(errors))
 
     def register_connection_views(self, con: duckdb.DuckDBPyConnection, connection: Connection) -> dict[str, str]:
         """Expose every CSV file of a connection as a DuckDB view named after the file.
@@ -333,6 +359,14 @@ class ConnectorService:
         if source_config.get("source_kind") == "oracle_sql":
             return source_config["source_sql"]
         return f"SELECT * FROM {source_config['source_name']}"
+
+    def rule_source_read_sql(self, source_config: dict[str, Any], connection_lookup: dict[int, Connection]) -> str:
+        """Describe the actual read query for either a CSV or database source."""
+        connection = self._rule_connection(source_config, connection_lookup)
+        if connection.connection_type == ConnectionType.CSV:
+            path = self._rule_csv_path(connection, source_config)
+            return f"SELECT * FROM {self._csv_reader(path)}"
+        return self.rule_source_sql(source_config)
 
     def _resolve_csv_path(self, dataset: Dataset, connection_lookup: dict[int, Connection]) -> Path:
         if dataset.dataset_type == DatasetType.CSV_FILE:

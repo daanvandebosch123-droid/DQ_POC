@@ -20,6 +20,7 @@ from nicegui import run as nicegui_run
 from dqtool.models.entities import (
     Connection,
     ConnectionType,
+    DQDimension,
     Project,
     Role,
     Rule,
@@ -31,6 +32,7 @@ from dqtool.models.entities import (
     ScheduleTargetKind,
     User,
     WorkspaceRole,
+    default_dq_dimension,
     utc_now,
 )
 from dqtool.services.ai import DEFAULT_ENDPOINT, DEFAULT_MODEL, OllamaService
@@ -1006,8 +1008,14 @@ class DQToolWebApp:
                     "outlined dense clearable prepend-icon=search"
                 ).classes("w-full max-w-md")
                 self.overview_search.on_value_change(lambda _event: self._refresh_overview_view())
+                self.overview_dimension_filter = ui.select(
+                    {"": "All dimensions", **{item.value: item.value.title() for item in DQDimension}},
+                    value="",
+                    label="DQ dimension",
+                ).props("outlined dense clearable options-dense").classes("w-52")
+                self.overview_dimension_filter.on_value_change(lambda _event: self._refresh_overview_view())
             overview_columns = self._tree_table_columns(
-                ["Batch", "Name", "Kind", "Details", "Owner", "Visibility", "Used In"]
+                ["Batch", "Name", "Kind", "Dimension", "Details", "Owner", "Visibility", "Used In"]
             )
             for column in overview_columns:
                 if column["name"] == "batch":
@@ -2819,11 +2827,59 @@ class DQToolWebApp:
             description = ui.textarea(
                 "Description (optional)", value=rule.description if rule else str(suggestion.get("description", "")) if suggestion else ""
             ).props("outlined autogrow").classes("w-full")
-            rule_type = ui.select(
-                {item.value: RULE_TEMPLATES[item]["name"] for item in RuleType},
-                value=rule.rule_type.value if rule else str(suggestion.get("rule_type")) if suggestion else RuleType.NOT_NULL.value,
-                label="Type",
-            ).classes("w-full")
+            initial_rule_type = rule.rule_type if rule else RuleType(str(suggestion.get("rule_type"))) if suggestion else RuleType.NOT_NULL
+            custom_sql_types = {
+                RuleType.CUSTOM_SQL_FAIL_ROWS, RuleType.CUSTOM_SQL_THRESHOLD, RuleType.CUSTOM_SQL_CONNECTION,
+            }
+            type_options: dict[str, str] = {}
+            group_starts: list[int] = []
+            for dimension in DQDimension:
+                members = [item for item in RuleType if item not in custom_sql_types and default_dq_dimension(item) == dimension]
+                if members:
+                    group_starts.append(len(type_options))
+                    for item in members:
+                        type_options[item.value] = f"{dimension.value.title()} → {RULE_TEMPLATES[item]['name']}"
+            group_starts.append(len(type_options))
+            for item in RuleType:
+                if item in custom_sql_types:
+                    type_options[item.value] = f"Custom SQL → {RULE_TEMPLATES[item]['name']}"
+            with ui.row().classes("w-full items-start gap-3 flex-wrap"):
+                rule_type = ui.select(
+                    type_options,
+                    value=initial_rule_type.value,
+                    label="Rule type",
+                ).props("outlined options-dense").classes("grow min-w-[260px]")
+                rule_type.add_slot(
+                    "selected-item",
+                    "<span>{{ props.opt.label.split(' → ')[1] }}</span>",
+                )
+                rule_type.add_slot(
+                    "option",
+                    '''
+                    <div>
+                        <q-item-label v-if="GROUP_STARTS.includes(props.index)" header
+                            class="text-weight-bold"
+                            style="background: #f0eee9; color: #514a40; font-size: 13px;
+                                   letter-spacing: 0.06em; text-transform: uppercase;
+                                   padding: 12px 16px; border-bottom: 1px solid #d8d2c8;">
+                            {{ props.opt.label.split(' → ')[0] }}
+                        </q-item-label>
+                        <q-item v-bind="props.itemProps">
+                            <q-item-section>
+                                <q-item-label>{{ props.opt.label.split(' → ')[1] }}</q-item-label>
+                            </q-item-section>
+                        </q-item>
+                    </div>
+                    '''.replace("GROUP_STARTS", json.dumps(group_starts)),
+                )
+                dq_dimension = ui.select(
+                    {item.value: item.value.title() for item in DQDimension},
+                    value=(rule.dq_dimension.value if rule else None if initial_rule_type in custom_sql_types else default_dq_dimension(initial_rule_type).value),
+                    label="DQ dimension *",
+                ).props("outlined options-dense").classes("w-56")
+            ui.label("Preset types suggest a dimension. You can change it; for custom SQL, choose what the query measures.").classes(
+                "text-xs text-[#837d74]"
+            )
             visibility = ui.select(
                 {"private": "private", "shared": "shared", "shared_specific": "shared_specific"},
                 value=rule.visibility if rule else "private",
@@ -2903,7 +2959,7 @@ class DQToolWebApp:
                         ui.icon("ads_click", color="secondary").classes("text-xl")
                     with ui.column().classes("gap-0"):
                         ui.label("Target").classes("dq-panel-title text-lg font-bold")
-                        ui.label("Required for referential integrity rules").classes("text-xs text-[#837d74]")
+                        ui.label("Required for referential integrity and keyed comparison rules").classes("text-xs text-[#837d74]")
                 target_connection = ui.select(
                     connection_options,
                     value=default_connection,
@@ -2980,7 +3036,52 @@ class DQToolWebApp:
                 target_key_select = ui.select(
                     [], label="Target key field *", with_input=True, clearable=True
                 ).props("outlined options-dense").classes("w-full")
-                target_relation = ui.input("Target relation *").classes("w-full")
+                with ui.column().classes("w-full gap-2") as comparison_target_panel:
+                    ui.label(
+                        "Map each source field to its target field; connections and field names may differ. "
+                        "Only matching keys are compared; use Referential Integrity to find missing target keys."
+                    ).classes("text-xs text-[#837d74]")
+                    comparison_target_key = ui.select(
+                        [], label="Target matching key *", with_input=True, clearable=True,
+                    ).props("outlined options-dense").classes("w-full")
+                    ui.label("Fields to compare").classes("text-sm font-semibold")
+                    comparison_pair_container = ui.column().classes("w-full gap-2")
+                    ui.button("Add field pair", icon="add", on_click=lambda: add_comparison_pair()).props("outline no-caps")
+                    ui.button("Reload target fields", icon="refresh", on_click=lambda: refresh_target_rule_columns()).props(
+                        "outline no-caps"
+                    )
+
+            comparison_pair_controls: list[tuple[ui.select, ui.select, Any]] = []
+            comparison_target_fields: list[str] = []
+
+            def update_comparison_field_options() -> None:
+                selects = [(comparison_target_key, comparison_target_fields)]
+                for source_select, target_select, _row in comparison_pair_controls:
+                    selects.extend([(source_select, list(field_select.options)), (target_select, comparison_target_fields)])
+                for select, available in selects:
+                    select.options = list(dict.fromkeys([*available, *([select.value] if select.value else [])]))
+                    select.update()
+
+            def add_comparison_pair(source: str | None = None, target: str | None = None) -> None:
+                with comparison_pair_container:
+                    with ui.row().classes("w-full items-center gap-2 flex-wrap") as pair_row:
+                        source_select = ui.select(
+                            list(dict.fromkeys([*field_select.options, *([source] if source else [])])),
+                            value=source, label="Source field *", with_input=True, clearable=True,
+                        ).props("outlined options-dense").classes("grow min-w-[180px]")
+                        ui.icon("arrow_forward").classes("text-stone-400")
+                        target_select = ui.select(
+                            list(dict.fromkeys([*comparison_target_fields, *([target] if target else [])])),
+                            value=target, label="Target field *", with_input=True, clearable=True,
+                        ).props("outlined options-dense").classes("grow min-w-[180px]")
+                        controls = (source_select, target_select, pair_row)
+
+                        def remove_pair() -> None:
+                            comparison_pair_controls.remove(controls)
+                            pair_row.delete()
+
+                        ui.button(icon="delete_outline", on_click=remove_pair).props("flat round").tooltip("Remove field pair")
+                comparison_pair_controls.append(controls)
 
             with ui.expansion("Advanced configuration JSON", value=False).classes("w-full"):
                 with ui.row().classes("w-full items-center justify-between"):
@@ -3022,11 +3123,21 @@ class DQToolWebApp:
                 threshold_operator.value = config.get("operator", ">")
                 threshold_value.value = config.get("threshold", 0)
                 target_key_select.value = target_key if target_key in target_key_select.options else None
-                target_relation.value = config.get("target_relation", "")
+                if selected_type == RuleType.KEYED_COMPARISON:
+                    normalized_comparison = normalize_rule_config(selected_type, config)
+                    key = normalized_comparison.get("target_key_column")
+                    comparison_target_key.options = [key] if key else []
+                    comparison_target_key.value = key or None
+                    comparison_pair_container.clear()
+                    comparison_pair_controls.clear()
+                    for pair in normalized_comparison.get("comparison_pairs", []):
+                        add_comparison_pair(pair.get("source"), pair.get("target"))
+                    if not comparison_pair_controls:
+                        add_comparison_pair()
                 for element in (
                     field_select, fields_select, min_count, max_count, min_value, max_value,
                     regex_pattern, min_length, max_length, max_age_days, min_date, max_date, allowed_values, rule_sql,
-                    threshold_operator, threshold_value, target_key_select, target_relation,
+                    threshold_operator, threshold_value, target_key_select, comparison_target_key,
                 ):
                     element.update()
 
@@ -3044,7 +3155,7 @@ class DQToolWebApp:
                     RuleType.KEYED_COMPARISON,
                 }
                 field_select.visible = selected_type in single_field_types
-                fields_select.visible = selected_type in {RuleType.UNIQUE, RuleType.DUPLICATE, RuleType.KEYED_COMPARISON}
+                fields_select.visible = selected_type in {RuleType.UNIQUE, RuleType.DUPLICATE}
                 row_count_fields.visible = selected_type == RuleType.ROW_COUNT
                 value_range_fields.visible = selected_type == RuleType.VALUE_RANGE
                 regex_pattern.visible = selected_type == RuleType.REGEX
@@ -3080,19 +3191,19 @@ class DQToolWebApp:
                 csv_sql_hint.update()
                 threshold_fields.visible = selected_type == RuleType.CUSTOM_SQL_THRESHOLD
                 target_key_select.visible = selected_type == RuleType.REFERENTIAL_INTEGRITY
-                target_relation.visible = selected_type == RuleType.KEYED_COMPARISON
+                comparison_target_panel.visible = selected_type == RuleType.KEYED_COMPARISON
 
                 field_label = "Field *"
                 if selected_type == RuleType.REFERENTIAL_INTEGRITY:
                     field_label = "Source key field *"
                 elif selected_type == RuleType.KEYED_COMPARISON:
-                    field_label = "Key field *"
+                    field_label = "Source matching key *"
                 field_select.props["label"] = field_label
-                fields_select.props["label"] = "Comparison fields *" if selected_type == RuleType.KEYED_COMPARISON else "Fields *"
+                fields_select.props["label"] = "Fields *"
                 for element in (
                     field_select, fields_select, row_count_fields, value_range_fields, regex_pattern,
                     length_fields, freshness_fields, date_range_fields, allowed_values, rule_sql, threshold_fields,
-                    target_key_select, target_relation,
+                    target_key_select, comparison_target_key,
                 ):
                     element.update()
 
@@ -3114,7 +3225,7 @@ class DQToolWebApp:
                 hint.update()
                 allowed_users.visible = visibility.value == "shared_specific"
                 allowed_users.update()
-                target_helper.visible = selected_type == RuleType.REFERENTIAL_INTEGRITY
+                target_helper.visible = selected_type in {RuleType.REFERENTIAL_INTEGRITY, RuleType.KEYED_COMPARISON}
                 target_helper.update()
                 update_setting_visibility()
 
@@ -3295,16 +3406,26 @@ class DQToolWebApp:
                     source_columns,
                     (field_select, fields_select),
                 )
+                update_comparison_field_options()
 
             async def refresh_target_rule_columns() -> None:
+                nonlocal comparison_target_fields
+                is_comparison = RuleType(rule_type.value) == RuleType.KEYED_COMPARISON
+                target_selects = (
+                    (comparison_target_key, *[target for _source, target, _row in comparison_pair_controls])
+                    if is_comparison else (target_key_select,)
+                )
                 await populate_rule_columns(
                     target_connection,
                     target_kind,
                     target_name,
                     target_sql,
                     target_columns,
-                    (target_key_select,),
+                    target_selects,
                 )
+                if is_comparison:
+                    comparison_target_fields = list(comparison_target_key.options)
+                    update_comparison_field_options()
 
             async def refresh_source_targets() -> None:
                 sync_reference_fields(source_connection, source_kind, source_name, source_sql)
@@ -3320,9 +3441,13 @@ class DQToolWebApp:
                     await refresh_target_rule_columns()
 
             async def handle_rule_type_change() -> None:
+                if not rule:
+                    selected_type = RuleType(rule_type.value)
+                    dq_dimension.value = None if selected_type in custom_sql_types else default_dq_dimension(selected_type).value
+                    dq_dimension.update()
                 set_example()
                 await refresh_source_targets()
-                if RuleType(rule_type.value) == RuleType.REFERENTIAL_INTEGRITY:
+                if RuleType(rule_type.value) in {RuleType.REFERENTIAL_INTEGRITY, RuleType.KEYED_COMPARISON}:
                     await refresh_target_targets()
 
             rule_type.on_value_change(lambda _event: handle_rule_type_change())
@@ -3348,9 +3473,14 @@ class DQToolWebApp:
                 source_name.options = [existing_source_name] if existing_source_name else []
                 source_name.value = existing_source_name or None
                 source_sql.value = str(existing_config.get("source_sql", ""))
-                target_connection.value = self._id_to_str(existing_config.get("target_connection_id"))
+                target_id = existing_config.get("target_connection_id")
+                if RuleType(rule_type.value) == RuleType.KEYED_COMPARISON and target_id is None:
+                    target_id = existing_config.get("source_connection_id")
+                target_connection.value = self._id_to_str(target_id)
                 target_kind.value = existing_config.get("target_kind") or target_kind.value
                 existing_target_name = str(existing_config.get("target_name", ""))
+                if RuleType(rule_type.value) == RuleType.KEYED_COMPARISON and not existing_target_name:
+                    existing_target_name = str(existing_config.get("comparison_target_name") or existing_config.get("target_relation") or "")
                 target_name.options = [existing_target_name] if existing_target_name else []
                 target_name.value = existing_target_name or None
                 target_sql.value = str(existing_config.get("target_sql", ""))
@@ -3362,7 +3492,7 @@ class DQToolWebApp:
             sync_reference_fields(target_connection, target_kind, target_name, target_sql)
             update_hint()
             ui.timer(0.1, refresh_source_targets, once=True)
-            if RuleType(rule_type.value) == RuleType.REFERENTIAL_INTEGRITY:
+            if RuleType(rule_type.value) in {RuleType.REFERENTIAL_INTEGRITY, RuleType.KEYED_COMPARISON}:
                 ui.timer(0.1, refresh_target_targets, once=True)
 
             def rule_config_from_form() -> tuple[RuleType, dict[str, Any]]:
@@ -3385,9 +3515,9 @@ class DQToolWebApp:
                 )
                 for key in ("target_connection_id", "target_kind", "target_name", "target_sql"):
                     merged.pop(key, None)
-                if selected_type == RuleType.REFERENTIAL_INTEGRITY:
+                if selected_type in {RuleType.REFERENTIAL_INTEGRITY, RuleType.KEYED_COMPARISON}:
                     if not target_connection.value or str(target_connection.value) not in connections:
-                        raise ValueError("Select a valid target connection for this referential integrity rule.")
+                        raise ValueError("Select a valid target connection for this rule.")
                     merged.update(
                         {
                             "target_connection_id": int(target_connection.value),
@@ -3400,6 +3530,8 @@ class DQToolWebApp:
                     "column", "columns", "min_count", "max_count", "min", "max", "pattern",
                     "min_length", "max_length", "max_age_days", "min_date", "max_date", "values", "sql", "operator", "threshold",
                     "source_key", "target_key", "key_column", "compare_columns", "target_relation",
+                    "comparison_target_name",
+                    "target_key_column", "comparison_pairs",
                     "fail_threshold_count", "fail_threshold_percent",
                 }
                 for key in setting_keys:
@@ -3442,8 +3574,12 @@ class DQToolWebApp:
                     merged["target_key"] = str(target_key_select.value or "").strip()
                 elif selected_type == RuleType.KEYED_COMPARISON:
                     merged["key_column"] = str(field_select.value or "").strip()
-                    merged["compare_columns"] = list(fields_select.value or [])
-                    merged["target_relation"] = str(target_relation.value or "").strip()
+                    merged["target_key_column"] = str(comparison_target_key.value or "").strip()
+                    merged["comparison_pairs"] = [
+                        {"source": str(source.value or "").strip(), "target": str(target.value or "").strip()}
+                        for source, target, _row in comparison_pair_controls
+                    ]
+                    merged["compare_columns"] = [pair["source"] for pair in merged["comparison_pairs"]]
                 normalized = normalize_rule_config(selected_type, merged)
                 errors = validate_rule_config(selected_type, normalized, require_source=True)
                 if errors:
@@ -3479,19 +3615,27 @@ class DQToolWebApp:
                         ui.button("Close", on_click=preview_dialog.close).props("flat")
                 preview_dialog.open()
 
-            def save() -> None:
+            async def save() -> None:
                 try:
                     if not self.project:
                         raise ValueError("Open a project first.")
                     if not (name.value or "").strip():
                         raise ValueError("Rule name is required.")
+                    if not dq_dimension.value:
+                        raise ValueError("Choose a DQ dimension for this rule.")
                     selected_type, normalized = rule_config_from_form()
+                    if selected_type == RuleType.KEYED_COMPARISON:
+                        await nicegui_run.io_bound(
+                            self.connector_service.validate_keyed_comparison_fields, normalized,
+                            {int(key): value for key, value in connections.items()},
+                        )
                     new_rule = Rule(
                         id=rule.id if rule else None,
                         name=(name.value or "").strip(),
                         rule_type=selected_type,
                         dataset_id=None,
                         owner_username=rule.owner_username if rule else self.current_user,
+                        dq_dimension=DQDimension(str(dq_dimension.value)),
                         description=str(description.value or "").strip(),
                         visibility=str(visibility.value),
                         allowed_users=self._split_csv_text(allowed_users.value),
@@ -4944,6 +5088,7 @@ class DQToolWebApp:
                     "parent_key": parent_key,
                     "id": group.id,
                     "kind": "group",
+                    "dimension": "-",
                     "depth": depth,
                     "name": group.name,
                     "details": details,
@@ -4966,6 +5111,7 @@ class DQToolWebApp:
                     "parent_key": parent_key,
                     "id": rule.id,
                     "kind": "rule",
+                    "dimension": rule.dq_dimension.value.title(),
                     "depth": depth,
                     "name": rule.name,
                     # Split into a type chip ("detail_type") plus a free-text caption ("details")
@@ -5619,7 +5765,21 @@ class DQToolWebApp:
 
     def _visible_overview_rows(self) -> list[dict[str, Any]]:
         query = (self.overview_search.value or "").strip().lower() if hasattr(self, "overview_search") else ""
-        return self._visible_tree_rows(self._overview_all_rows, self._overview_collapsed, query)
+        dimension = (
+            str(self.overview_dimension_filter.value or "")
+            if hasattr(self, "overview_dimension_filter")
+            else ""
+        )
+        return self._visible_tree_rows(
+            self._overview_all_rows,
+            self._overview_collapsed,
+            query,
+            row_filter=(
+                lambda row: row["kind"] == "rule" and row.get("dimension", "").lower() == dimension
+            )
+            if dimension
+            else None,
+        )
 
     def _visible_results_rows(self) -> list[dict[str, Any]]:
         query = (self.results_search.value or "").strip().lower() if hasattr(self, "results_search") else ""
@@ -5635,7 +5795,8 @@ class DQToolWebApp:
         rows: list[dict[str, Any]],
         collapsed: set[str],
         query: str,
-        search_fields: tuple[str, ...] = ("name", "details", "owner", "visibility", "used_in", "kind"),
+        search_fields: tuple[str, ...] = ("name", "dimension", "details", "owner", "visibility", "used_in", "kind"),
+        row_filter: Callable[[dict[str, Any]], bool] | None = None,
     ) -> list[dict[str, Any]]:
         """Shared tree filtering for the Rules and Results overviews: a text search shows matches
         plus their ancestor chain (so tree context stays visible) and, for a matched group, its
@@ -5646,11 +5807,12 @@ class DQToolWebApp:
             if row.get("parent_key"):
                 children_by_parent.setdefault(row["parent_key"], []).append(row)
 
-        if query:
+        if query or row_filter is not None:
             matched = {
                 row["stable_key"]
                 for row in rows
-                if query in " ".join(str(row.get(field, "")) for field in search_fields).lower()
+                if (not query or query in " ".join(str(row.get(field, "")) for field in search_fields).lower())
+                and (row_filter is None or row_filter(row))
             }
             visible: set[str] = set()
 
@@ -5970,6 +6132,7 @@ class DQToolWebApp:
             "batch": "54px",
             "id": "52px",
             "kind": "82px",
+            "dimension": "116px",
             "owner": "104px",
             "visibility": "108px",
             "used_in": "120px",

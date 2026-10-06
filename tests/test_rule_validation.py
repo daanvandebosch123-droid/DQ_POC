@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import unittest
 
-from dqtool.models.entities import RuleType
+from dqtool.models.entities import DQDimension, RuleType, default_dq_dimension
 from dqtool.services.rules import validate_rule_config
 
 
 class RuleValidationTests(unittest.TestCase):
+    def test_rule_templates_have_expected_primary_dimensions(self) -> None:
+        self.assertEqual(DQDimension.COMPLETENESS, default_dq_dimension(RuleType.NOT_NULL))
+        self.assertEqual(DQDimension.TIMELINESS, default_dq_dimension(RuleType.DATA_FRESHNESS))
+        self.assertEqual(DQDimension.UNIQUENESS, default_dq_dimension(RuleType.DUPLICATE))
+        self.assertEqual(DQDimension.CONSISTENCY, default_dq_dimension(RuleType.REFERENTIAL_INTEGRITY))
+        self.assertEqual(DQDimension.ACCURACY, default_dq_dimension(RuleType.KEYED_COMPARISON))
+        self.assertEqual(DQDimension.VALIDITY, default_dq_dimension(RuleType.REGEX))
+
     def test_new_rule_requires_an_explicit_source_connection(self) -> None:
         errors = validate_rule_config(
             RuleType.NOT_NULL,
